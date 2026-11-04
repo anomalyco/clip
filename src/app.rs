@@ -509,6 +509,9 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
         Some(r) => review::view(s, r, cx),
         None => home::view(s, cx),
     };
+    // Windows and Linux: Clip's own title bar over the band the views leave for macOS's.
+    #[cfg(not(target_os = "macos"))]
+    let body = el().w_full().h_full().child(body.w_full().h_full()).child(ui::titlebar());
     match &s.error {
         Some(e) => rune::col().w_full().h_full().child(body.grow(1.0))
             .child(row().key("error").w_full().h(32.0).px(16.0).center_y().fill(hex("#3a1416"))
@@ -563,7 +566,12 @@ fn app_main() {
         min_size: Some((600.0, 480.0)),
         ..AppSpec::new("Clip", home::SETUP_SIZE, || unreachable!(), view)
     };
-    let mut app = App::new(spec).windowless().accessory().release_gpu_when_closed()
+    let app = App::new(spec).windowless().accessory().release_gpu_when_closed();
+    // Windows and Linux draw their own title bar (ui::titlebar), as macOS's full-size content
+    // does under its traffic lights: no system frame.
+    #[cfg(not(target_os = "macos"))]
+    let app = app.window_options(rune::WindowOptions { borderless: true, ..Default::default() });
+    let mut app = app
         .on_reopen(|s, _, tx| { s.show(tx); true })
         .on_close(|s, _| {
             s.review = None;

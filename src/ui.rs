@@ -53,3 +53,28 @@ pub fn clock(t: f64) -> String {
 pub fn megabytes(bytes: u64) -> String {
     if bytes >= 1_000_000 { format!("{:.1} MB", bytes as f64 / 1e6) } else { format!("{} KB", bytes / 1000) }
 }
+
+/// Windows and Linux: Clip's title bar, as macOS draws Clip's window. A strip across the top
+/// that moves the window (a double press maximizes) and close, minimize and zoom lights where
+/// macOS 26 puts its own, showing their symbols while the pointer is over them.
+#[cfg(not(target_os = "macos"))]
+pub fn titlebar() -> El {
+    use rune::{Chrome, Tx};
+    let rects = Chrome::DEFAULT.traffic_light_rects().expect("full-size content has lights");
+    let light = |key: &'static str, color: &str, glyph: &'static str, act: fn(&mut Tx)| {
+        let size = Chrome::TRAFFIC_LIGHT;
+        el().key(key).size(size, size).radius(size / 2.0).fill(hex(color)).border(0.5, Color::BLACK.alpha(0.25))
+            .center()
+            .child(text(glyph).font(TextStyle::new(11.0, 700.0)).color(Color::BLACK.alpha(0.55)).group_opacity(0.0, 1.0))
+            .on_press_tx(move |_: &mut crate::Clip, tx: &mut Tx| act(tx))
+    };
+    let lights = row().key("lights").absolute(rects[0][0], rects[0][1]).gap(Chrome::TRAFFIC_PITCH - Chrome::TRAFFIC_LIGHT).hover_group()
+        .child(light("light-close", "#ff5f57", "×", |tx| tx.close_window()))
+        .child(light("light-minimize", "#febc2e", "−", |tx| tx.minimize()))
+        .child(light("light-zoom", "#28c840", "+", |_| {}));
+    el().key("titlebar").absolute(0.0, 0.0).w_full().h(TITLEBAR).window_drag().child(lights)
+}
+
+/// The band at the top of every window the title bar (or macOS's) sits in.
+#[cfg(not(target_os = "macos"))]
+const TITLEBAR: f32 = 36.0;
