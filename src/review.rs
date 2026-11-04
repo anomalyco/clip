@@ -10,7 +10,8 @@ use crate::view::{self, Source};
 use crate::zoom::{self, Key};
 use crate::{Clip, Phase};
 use rune::tok::type_;
-use rune::{Color, Cx, Drag, El, Image, Live, LiveText, Phase as DragPhase, Player, SurfaceFit, Tx, col, el, row, spacer, text};
+use crate::playback::Playback;
+use rune::{Color, Cx, Drag, El, Image, Live, LiveText, Phase as DragPhase, SurfaceFit, Tx, col, el, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, SegmentedControl, Switch};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -90,7 +91,7 @@ struct Preview {
 }
 
 pub struct Review {
-    pub player: Player,
+    pub player: Playback,
     pub source: PathBuf,
     pub track: Track,
     /// Seconds.
@@ -122,11 +123,11 @@ pub struct Review {
 
 impl Review {
     pub fn new(path: PathBuf, waker: Option<&rune::Waker>, has_audio: bool) -> Self {
-        let player = Player::file(&path);
-        if let Some(w) = waker { player.set_waker(w.clone()) }
+        // Frames come through Pixels, which wake the window themselves.
+        let _ = waker;
+        let player = Playback::file(&path);
         player.set_muted(!has_audio);
         player.set_looping(true);
-        player.preload();
         player.play();
         let track = Track::load(&path);
         Self {
@@ -413,7 +414,7 @@ fn edit_stage(s: &Clip, r: &Review, stage: [f32; 2], mut root: El) -> El {
     r.preview.set(None);
     let size = r.player.natural_size().unwrap_or((16, 9));
     let [ox, oy, w, h] = fit(stage, size);
-    root = root.child(el().key("video").absolute(ox, oy).w(w).h(h).radius(6.0).video(&r.player, SurfaceFit::Fill));
+    root = root.child(el().key("video").absolute(ox, oy).w(w).h(h).radius(6.0).pixels_fit(r.player.pixels(), SurfaceFit::Fill));
     // The crop for Desktop; for a window, where the shot is at the playhead (before zoom).
     let outline = match r.shot {
         Source::Desktop => r.crop,
@@ -471,7 +472,7 @@ fn preview_stage(s: &Clip, r: &Review, stage: [f32; 2], root: El) -> El {
     let radius = canvas_radius as f32 * k;
     root.child(el().key("frame").absolute(inner[0], inner[1]).w(inner[2]).h(inner[3]).radius(radius).clip_rounded(radius)
         .shadow(if radius > 0.0 { 10.0 } else { 0.0 }, if radius > 0.0 { 30.0 } else { 0.0 }, Color::BLACK.alpha(0.45))
-        .child(el().key("video").absolute(vx, vy).w(vw).h(vh).live_rect(&r.video_rect).video(&r.player, SurfaceFit::Fill)))
+        .child(el().key("video").absolute(vx, vy).w(vw).h(vh).live_rect(&r.video_rect).pixels_fit(r.player.pixels(), SurfaceFit::Fill)))
 }
 
 fn stage(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {

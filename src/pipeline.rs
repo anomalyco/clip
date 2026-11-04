@@ -139,15 +139,15 @@ struct Decoder {
 }
 
 impl Decoder {
-    /// Opens the recording's picture over the trim and uploads its first frame.
-    fn open(asset: &AnyObject, plan: &Plan, renderer: &mut Renderer) -> Result<Decoder, String> {
+    /// Opens the recording's picture from `start` to `end` (seconds) and uploads its first frame.
+    fn open(asset: &AnyObject, start: f64, end: f64, renderer: &mut Renderer) -> Result<Decoder, String> {
         unsafe {
             let videos: Retained<NSArray<AnyObject>> = msg_send![asset, tracksWithMediaType: &*ns("vide")];
             let video = videos.firstObject().ok_or("the recording has no video")?;
             let mut err: *mut AnyObject = std::ptr::null_mut();
             let reader: Option<Retained<AnyObject>> = msg_send![class!(AVAssetReader), assetReaderWithAsset: asset, error: &mut err];
             let reader = reader.ok_or("couldn't open the recording")?;
-            let _: () = msg_send![&reader, setTimeRange: CMTimeRange { start: time(plan.start), duration: time(plan.end - plan.start) }];
+            let _: () = msg_send![&reader, setTimeRange: CMTimeRange { start: time(start), duration: time((end - start).max(0.0)) }];
             let decoded = dict(&[(&ns("PixelFormatType"), &num(BGRA))]);
             let output: Retained<AnyObject> = msg_send![class!(AVAssetReaderTrackOutput), assetReaderTrackOutputWithTrack: &*video, outputSettings: &*decoded];
             let _: () = msg_send![&output, setAlwaysCopiesSampleData: false];
@@ -162,7 +162,8 @@ impl Decoder {
     }
 
     /// Steps to the last frame at or before source time `t`, uploading it if it changed.
-    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<(), String> {
+    /// True when it did.
+    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
         let mut changed = false;
         while self.following.as_ref().is_some_and(|f| f.time() <= t + 1e-4) {
             self.current = self.following.take().expect("checked");
@@ -170,7 +171,8 @@ impl Decoder {
             changed = true;
         }
         let _ = &self.reader;
-        if changed { upload(renderer, &self.current) } else { Ok(()) }
+        if changed { upload(renderer, &self.current)? }
+        Ok(changed)
     }
 }
 
@@ -266,7 +268,7 @@ pub fn export(source: &Path, plan: &Plan, out: &Path, progress: impl Fn(f32)) ->
         });
 
         // The picture: the trimmed source track, decoded as BGRA, in order.
-        let mut decoder = Decoder::open(&asset, plan, &mut renderer)?;
+        let mut decoder = Decoder::open(&asset, plan.start, plan.end, &mut renderer)?;
         if let Some((r, _)) = &sound {
             let ok: Bool = msg_send![&**r, startReading];
             if !ok.as_bool() { return Err("couldn't read the recording's sound".into()) }
@@ -366,8 +368,36 @@ pub fn gif(source: &Path, plan: &Plan, out: &Path, fps: f64, fit: (u32, u32), pr
     autoreleasepool(|_| {
         let src_url = NSURL::fileURLWithPath(&ns(source.to_str().ok_or("path")?));
         let asset: Retained<AnyObject> = unsafe { msg_send![class!(AVURLAsset), URLAssetWithURL: &*src_url, options: std::ptr::null::<AnyObject>()] };
-        let mut decoder = Decoder::open(&asset, plan, &mut renderer)?;
+        let mut decoder = Decoder::open(&asset, plan.start, plan.end, &mut renderer)?;
         crate::gif::from_frames(out, (canvas.w, canvas.h), fps, count,
             |i| frame_at(&mut decoder, &mut renderer, plan, &segs, &canvas, i as f64 / fps), progress)
     })
+}
+
+/// The recording's frames from a time on, for the review's playback (src/playback.rs): opened
+/// at a time, stepped forward through it, reopened to go back.
+pub struct Frames {
+    decoder: Decoder,
+}
+
+impl Frames {
+    /// Opens `source` at `from` seconds and uploads the frame showing then.
+    pub fn open(source: &Path, from: f64, renderer: &mut Renderer) -> Result<Frames, String> {
+        autoreleasepool(|_| {
+            let url = NSURL::fileURLWithPath(&ns(source.to_str().ok_or("path")?));
+            let asset: Retained<AnyObject> = unsafe { msg_send![class!(AVURLAsset), URLAssetWithURL: &*url, options: std::ptr::null::<AnyObject>()] };
+            let end = seconds(unsafe { msg_send![&asset, duration] });
+            Ok(Frames { decoder: Decoder::open(&asset, from.min((end - 0.05).max(0.0)), end, renderer)? })
+        })
+    }
+
+    /// Steps forward to the frame showing at `t`, uploading it. True when it changed.
+    pub fn step_to(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
+        autoreleasepool(|_| self.decoder.seek(t, renderer))
+    }
+
+    /// The time of the frame showing.
+    pub fn time(&self) -> f64 {
+        self.decoder.current.time()
+    }
 }

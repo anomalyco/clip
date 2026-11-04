@@ -172,14 +172,16 @@ impl Decoder {
     }
 
     /// Steps to the last frame at or before source time `t`, uploading it if it changed.
-    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<(), String> {
+    /// True when it did.
+    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
         let mut changed = false;
         while self.following.as_ref().is_some_and(|f| f.time <= t + 1e-4) {
             self.current = self.following.take().expect("checked");
             self.following = self.next()?;
             changed = true;
         }
-        if changed { upload(renderer, &self.current) } else { Ok(()) }
+        if changed { upload(renderer, &self.current)? }
+        Ok(changed)
     }
 }
 
@@ -239,4 +241,27 @@ pub fn export(source: &Path, plan: &Plan, out: &Path, progress: impl Fn(f32)) ->
     encoder.finish().map_err(|e| format!("writing the movie failed ({e})"))?;
     progress(1.0);
     Ok(())
+}
+
+/// The recording's frames from a time on, for the review's playback (src/playback.rs): opened
+/// at a time, stepped forward through it, reopened to go back.
+pub struct Frames {
+    decoder: Decoder,
+}
+
+impl Frames {
+    /// Opens `source` at `from` seconds and uploads the frame showing then.
+    pub fn open(source: &Path, from: f64, renderer: &mut Renderer) -> Result<Frames, String> {
+        Ok(Frames { decoder: Decoder::open(source, from, renderer)? })
+    }
+
+    /// Steps forward to the frame showing at `t`, uploading it. True when it changed.
+    pub fn step_to(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
+        self.decoder.seek(t, renderer)
+    }
+
+    /// The time of the frame showing.
+    pub fn time(&self) -> f64 {
+        self.decoder.current.time
+    }
 }

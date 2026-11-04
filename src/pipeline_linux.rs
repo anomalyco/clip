@@ -34,17 +34,17 @@ struct Decoder {
 }
 
 impl Decoder {
-    /// Opens the recording's picture over the trim and uploads its first frame.
-    fn open(source: &Path, plan: &Plan, renderer: &mut Renderer) -> Result<Decoder, String> {
+    /// Opens the recording's picture from `start` to `end` (seconds) and uploads its first frame.
+    fn open(source: &Path, start: f64, end: f64, renderer: &mut Renderer) -> Result<Decoder, String> {
         let probe = crate::thumbs::probe(source).ok_or("couldn't read the recording")?;
         let mut child = Command::new("ffmpeg")
-            .args(["-nostdin", "-v", "error", "-ss", &format!("{:.4}", plan.start)]).arg("-i").arg(source)
-            .args(["-t", &format!("{:.4}", (plan.end - plan.start).max(0.0)), "-an", "-fps_mode", "cfr", "-r", &format!("{}", probe.fps)])
+            .args(["-nostdin", "-v", "error", "-ss", &format!("{:.4}", start)]).arg("-i").arg(source)
+            .args(["-t", &format!("{:.4}", (end - start).max(0.0)), "-an", "-fps_mode", "cfr", "-r", &format!("{}", probe.fps)])
             .args(["-vf", "scale=in_color_matrix=bt709", "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
             .spawn().map_err(|e| format!("couldn't start ffmpeg ({e})"))?;
         let out = child.stdout.take().expect("piped");
-        let mut d = Decoder { child, out, w: probe.w, h: probe.h, fps: probe.fps, start: plan.start, index: 0, current: Vec::new(), following: None };
+        let mut d = Decoder { child, out, w: probe.w, h: probe.h, fps: probe.fps, start, index: 0, current: Vec::new(), following: None };
         d.current = d.next().ok_or("the recording has no frames")?;
         d.following = d.next();
         d.upload(renderer)?;
@@ -65,7 +65,8 @@ impl Decoder {
     }
 
     /// Steps to the last frame at or before source time `t`, uploading it if it changed.
-    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<(), String> {
+    /// True when it did.
+    fn seek(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
         let mut changed = false;
         while self.following.is_some() && self.time_of(self.index + 1) <= t + 1e-4 {
             self.current = self.following.take().expect("checked");
@@ -73,7 +74,8 @@ impl Decoder {
             self.following = self.next();
             changed = true;
         }
-        if changed { self.upload(renderer) } else { Ok(()) }
+        if changed { self.upload(renderer)? }
+        Ok(changed)
     }
 }
 
@@ -109,7 +111,7 @@ pub fn export(source: &Path, plan: &Plan, out: &Path, progress: impl Fn(f32)) ->
     let length = export::length(plan);
     let frames = ((length * plan.fps as f64).round() as u64).max(1);
     let mut renderer = Renderer::new(Pixels::Bgra)?;
-    let mut decoder = Decoder::open(source, plan, &mut renderer)?;
+    let mut decoder = Decoder::open(source, plan.start, plan.end, &mut renderer)?;
 
     let big = w > H264_MAX.0 || h > H264_MAX.1;
     let rate = bitrate(plan, w, h);
@@ -151,7 +153,31 @@ pub fn gif(source: &Path, plan: &Plan, out: &Path, fps: f64, fit: (u32, u32), pr
     let segs = export::segments(plan);
     let count = ((export::length(plan) * fps).floor() as usize).max(1);
     let mut renderer = Renderer::new(Pixels::Rgba)?;
-    let mut decoder = Decoder::open(source, plan, &mut renderer)?;
+    let mut decoder = Decoder::open(source, plan.start, plan.end, &mut renderer)?;
     crate::gif::from_frames(out, (canvas.w, canvas.h), fps, count,
         |i| frame_at(&mut decoder, &mut renderer, plan, &segs, &canvas, i as f64 / fps), progress)
+}
+
+/// The recording's frames from a time on, for the review's playback (src/playback.rs): opened
+/// at a time, stepped forward through it, reopened to go back.
+pub struct Frames {
+    decoder: Decoder,
+}
+
+impl Frames {
+    /// Opens `source` at `from` seconds and uploads the frame showing then.
+    pub fn open(source: &Path, from: f64, renderer: &mut Renderer) -> Result<Frames, String> {
+        let end = crate::thumbs::duration(source).ok_or("couldn't read the recording")?;
+        Ok(Frames { decoder: Decoder::open(source, from.min((end - 0.05).max(0.0)), end, renderer)? })
+    }
+
+    /// Steps forward to the frame showing at `t`, uploading it. True when it changed.
+    pub fn step_to(&mut self, t: f64, renderer: &mut Renderer) -> Result<bool, String> {
+        self.decoder.seek(t, renderer)
+    }
+
+    /// The time of the frame showing.
+    pub fn time(&self) -> f64 {
+        self.decoder.time_of(self.decoder.index)
+    }
 }

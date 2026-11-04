@@ -581,7 +581,6 @@ fn app_main() {
             let images = ImageCache::new(w.clone());
             s.icon = Some(images.load(&include_bytes!("../assets/clip-icon-256.png")[..]));
             s.images = Some(images);
-            if let Some(r) = &s.review { r.player.set_waker(w.clone()) }
             s.waker = Some(w);
         }),
         min_size: Some((600.0, 480.0)),

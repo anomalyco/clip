@@ -175,6 +175,11 @@ impl Renderer {
         Ok(())
     }
 
+    /// The size of the last uploaded frame.
+    pub fn source_size(&self) -> Option<(u32, u32)> {
+        self.source.as_ref().map(|s| (s.1, s.2))
+    }
+
     /// Draws `scene` over the last uploaded frame, and returns the canvas in the output byte
     /// order (rows `canvas.w * 4` bytes).
     pub fn render(&mut self, scene: &Scene) -> Result<Vec<u8>, String> {

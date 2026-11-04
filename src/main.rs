@@ -24,6 +24,7 @@ mod zoom;
 // per platform.
 #[cfg(not(windows))] mod home;
 #[cfg(not(windows))] mod picker;
+#[cfg(not(windows))] mod playback;
 #[cfg(not(windows))] mod review;
 #[cfg(not(windows))] mod sound;
 #[cfg(not(windows))] mod ui;
