@@ -126,13 +126,15 @@ pub struct Settings {
     pub background: Background,
     pub quality: Quality,
     pub fps: u32,
+    /// One-time changes already applied to this file (see `migrate`).
+    pub version: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self { setup: Setup::Welcome, system_audio: false, microphone: false, show_clicks: true, sounds: true, size: Size::Original,
-            pick_area: true, zoom: true, skip_idle: false, speed: 1.0, background: Background::None,
-            quality: Quality::Standard, fps: 60 }
+            pick_area: false, zoom: true, skip_idle: false, speed: 1.0, background: Background::None,
+            quality: Quality::Standard, fps: 60, version: VERSION }
     }
 }
 
@@ -140,9 +142,22 @@ fn path() -> PathBuf {
     crate::home().join("Library/Application Support/Clip/settings.json")
 }
 
+const VERSION: u32 = 1;
+
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let mut s: Settings = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        s.migrate();
+        s
+    }
+
+    /// Version 1: ⌃ ⌃ records the whole screen at once; the picker is opt-in. Files from
+    /// before it saved `pick_area: true` as the then-default, so it's turned off once.
+    fn migrate(&mut self) {
+        if self.version >= VERSION { return }
+        if self.version < 1 { self.pick_area = false }
+        self.version = VERSION;
+        self.save();
     }
 
     /// Written on a thread, never on the UI thread. Each writer takes the newest pending

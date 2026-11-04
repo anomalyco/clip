@@ -46,6 +46,9 @@ pub struct Track {
     pub clicks: Vec<(f64, f64, f64)>,
     /// Stretches of activity (pointer, clicks, keys, scrolling), merged across short gaps.
     pub busy: Vec<(f64, f64)>,
+    /// Where each window was and which was in front (whole-screen recordings only).
+    #[serde(default)]
+    pub windows: crate::windows::Windows,
 }
 
 impl Track {
@@ -82,7 +85,8 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    pub fn start(frame: [f64; 4], t0: Instant) -> Tracker {
+    /// `windows`: also log the windows over `frame` (for a whole-screen recording).
+    pub fn start(frame: [f64; 4], t0: Instant, windows: bool) -> Tracker {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let handle = std::thread::Builder::new().name("clip-track".into()).spawn(move || {
@@ -91,8 +95,13 @@ impl Tracker {
             };
             let mut last = counters();
             let mut track = Track { frame, ..Track::default() };
+            let mut tick = 0u32;
             while !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(16));
+                tick = tick.wrapping_add(1);
+                // The window list every tenth tick (about 6 a second): enough to follow a
+                // window being dragged, at a few milliseconds of work each.
+                if windows && tick % 10 == 1 { track.windows.sample(frame, t0.elapsed().as_secs_f64()) }
                 let now = counters();
                 if now == last { continue }
                 let t = t0.elapsed().as_secs_f64();
@@ -109,6 +118,7 @@ impl Tracker {
                 }
                 last = now;
             }
+            track.windows.finish(t0.elapsed().as_secs_f64());
             track
         }).expect("track thread");
         Tracker { stop, handle }

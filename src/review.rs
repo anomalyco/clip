@@ -6,6 +6,7 @@ use crate::export::{self, Plan};
 use crate::settings::{Background, FRAME_RATES, Quality, SPEEDS, Settings, Size};
 use crate::track::Track;
 use crate::ui::{BG, GREEN, clock, hex, hint, ink, kit, megabytes};
+use crate::view::{self, Source};
 use crate::zoom::{self, Key};
 use crate::{Clip, Phase};
 use rune::tok::type_;
@@ -59,19 +60,30 @@ struct Inputs {
     trim: (f64, f64),
     zoom: bool,
     skip_idle: bool,
+    source: Source,
+    px: (u32, u32),
 }
 
 struct Derived {
     inputs: Inputs,
+    views: Vec<view::Key>,
+    size: (u32, u32),
     zoom: Vec<Key>,
     idle: Vec<(f64, f64)>,
+}
+
+/// What the derived cache hands out.
+struct Parts<'a> {
+    views: &'a [view::Key],
+    size: (u32, u32),
+    zoom: &'a [Key],
+    idle: &'a [(f64, f64)],
 }
 
 /// Where the preview's video sits: its box in the stage, and the source pixels it shows.
 #[derive(Clone, Copy)]
 struct Preview {
     inner: [f32; 4],
-    crop: [f32; 4],
     natural: (f32, f32),
 }
 
@@ -87,6 +99,10 @@ pub struct Review {
     pub aspect: Aspect,
     pub film: Vec<Image>,
     pub muted: bool,
+    /// What the shot follows: Desktop (the crop), one window, or the window in front.
+    pub shot: Source,
+    /// App icons for the source chips, by process.
+    pub icons: Vec<(i32, Image)>,
     /// The playhead, clock and zoomed video move through live values while it plays, so
     /// playback redraws them instead of rebuilding the view every frame.
     playhead: Live<[f32; 2]>,
@@ -110,6 +126,7 @@ impl Review {
         let track = Track::load(&path);
         Self {
             player, source: path, track, trim: (0.0, f64::MAX), crop: FULL, grab: Grab::None, aspect: Aspect::Free, film: Vec::new(), muted: !has_audio,
+            shot: Source::Desktop, icons: Vec::new(),
             playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), video_rect: Live::new([0.0; 4]),
             track_w: Cell::new(SIZE.0 - 40.0), preview: Cell::new(None), rate: Cell::new(1.0), derived: RefCell::new(None),
         }
@@ -135,32 +152,40 @@ impl Review {
         Some([px(x, w), px(y, h), px(cw, w).max(2), px(ch, h).max(2)])
     }
 
-    /// The zoom plan and idle stretches for the current crop, trim and settings.
-    fn derived<T>(&self, s: &Settings, f: impl FnOnce(&[Key], &[(f64, f64)]) -> T) -> T {
-        let inputs = Inputs { crop: self.crop, trim: self.trim(), zoom: s.zoom, skip_idle: s.skip_idle };
+    /// The views, shot size, zoom plan and idle stretches for the current source, crop,
+    /// trim and settings, worked out again only when one of them changes.
+    fn derived<T>(&self, s: &Settings, f: impl FnOnce(Parts) -> T) -> T {
+        let px = self.player.natural_size().unwrap_or((16, 9));
+        let inputs = Inputs { crop: self.crop, trim: self.trim(), zoom: s.zoom, skip_idle: s.skip_idle, source: self.shot, px };
         let mut cache = self.derived.borrow_mut();
         if cache.as_ref().is_none_or(|d| d.inputs != inputs) {
             let (a, b) = inputs.trim;
             let crop = self.crop.map(|v| v as f64);
-            let zoom = if s.zoom { zoom::plan(&self.track.clicks, crop, a, b) } else { Vec::new() };
+            let (views, size) = view::plan(self.shot, &self.track.windows, crop, (px.0 as f64, px.1 as f64), a, b);
+            let zoom = if s.zoom { zoom::plan(&self.track.clicks, |t| view::sample(&views, t), a, b) } else { Vec::new() };
             let idle = if s.skip_idle { self.track.idle(a, b) } else { Vec::new() };
-            *cache = Some(Derived { inputs, zoom, idle });
+            *cache = Some(Derived { inputs, views, size, zoom, idle });
         }
         let d = cache.as_ref().expect("filled above");
-        f(&d.zoom, &d.idle)
+        f(Parts { views: &d.views, size: d.size, zoom: &d.zoom, idle: &d.idle })
+    }
+
+    /// The recording's rect (normalized) the shot shows at `t`.
+    fn shown(&self, s: &Settings, t: f64) -> [f64; 4] {
+        self.derived(s, |p| view::shown(view::sample(p.views, t), zoom::sample(p.zoom, t)))
     }
 
     pub fn plan(&self, s: &Settings, gif: bool) -> Option<Plan> {
-        let crop = self.crop_px()?;
+        let video = self.player.natural_size()?;
         let (start, end) = self.trim();
-        let (zoom, idle) = self.derived(s, |z, i| (z.to_vec(), i.to_vec()));
-        Some(Plan { start, end, crop, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, quality: s.quality, fps: s.fps, gif })
+        let (views, size, zoom, idle) = self.derived(s, |p| (p.views.to_vec(), p.size, p.zoom.to_vec(), p.idle.to_vec()));
+        Some(Plan { start, end, views, video, size, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, quality: s.quality, fps: s.fps, gif })
     }
 
     /// The export's size, and its length in seconds.
     fn out(&self, s: &Settings) -> Option<((u32, u32), f64)> {
         let plan = self.plan(s, false)?;
-        let c = export::canvas(plan.crop[2], plan.crop[3], s.background, s.size.bounds());
+        let c = export::canvas(plan.size.0, plan.size.1, s.background, s.size.bounds());
         Some(((c.w, c.h), export::length(&plan)))
     }
 
@@ -196,7 +221,7 @@ impl Review {
             let (a, b) = self.trim();
             if b > a && (p.time() >= b || p.time() < a - 0.05) { p.seek(a) }
             let t = p.time();
-            let idle = self.derived(s, |_, idle| idle.iter().any(|&(x, y)| t >= x && t < y));
+            let idle = self.derived(s, |d| d.idle.iter().any(|&(x, y)| t >= x && t < y));
             let rate = (s.speed * if idle { export::IDLE_SPEED } else { 1.0 }) as f32;
             if rate != self.rate.get() {
                 self.rate.set(rate);
@@ -213,20 +238,19 @@ impl Review {
         self.playhead.set([(x - 1.0).max(0.0), 0.0]);
         self.clock.set(format!("{} / {}", clock(now), clock(dur)));
         if let Some(p) = self.preview.get() {
-            let (z, cx, cy) = self.derived(s, |keys, _| zoom::sample(keys, now));
-            self.video_rect.set(video_rect(&p, z, cx, cy));
+            self.video_rect.set(video_rect(&p, self.shown(s, now)));
         }
     }
 }
 
-/// The video element's rect inside the preview box, showing the zoomed part of the crop.
-fn video_rect(p: &Preview, z: f64, cx: f64, cy: f64) -> [f32; 4] {
-    let [vx, vy, vw, _] = zoom::viewport(z, cx, cy).map(|v| v as f32);
+/// The video element's rect inside the preview box, so `shown` (the recording's rect,
+/// normalized) fills the box, fitted and centred.
+fn video_rect(p: &Preview, shown: [f64; 4]) -> [f32; 4] {
     let (nw, nh) = p.natural;
-    let [x, y, w, h] = p.crop;
-    let (left, top) = ((x + vx * w) * nw, (y + vy * h) * nh);
-    let k = p.inner[2] / (w * nw * vw);
-    [-left * k, -top * k, nw * k, nh * k]
+    let [x, y, w, h] = shown.map(|v| v as f32);
+    let k = (p.inner[2] / (w * nw)).min(p.inner[3] / (h * nh));
+    let (ox, oy) = ((p.inner[2] - w * nw * k) / 2.0, (p.inner[3] - h * nh * k) / 2.0);
+    [ox - x * nw * k, oy - y * nh * k, nw * k, nh * k]
 }
 
 /// Where the video sits inside a stage of `stage` points, fitted and centred.
@@ -246,6 +270,8 @@ fn crop_drag(s: &mut Clip, d: &mut Drag, tx: &mut Tx) {
         r.grab = Grab::None;
         return;
     }
+    // A window's shot follows the window; the crop applies to Desktop (and Follow's shape).
+    if r.shot != Source::Desktop && r.shot != Source::Follow { return }
     let Some(size) = r.player.natural_size() else { return };
     let [ox, oy, w, h] = fit([d.w, d.h], size);
     let norm = |x: f32, y: f32| [((x - ox) / w).clamp(0.0, 1.0), ((y - oy) / h).clamp(0.0, 1.0)];
@@ -364,13 +390,18 @@ pub fn on_key(s: &mut Clip, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-fn edit_stage(r: &Review, stage: [f32; 2], mut root: El) -> El {
+fn edit_stage(s: &Clip, r: &Review, stage: [f32; 2], mut root: El) -> El {
     r.preview.set(None);
     let size = r.player.natural_size().unwrap_or((16, 9));
     let [ox, oy, w, h] = fit(stage, size);
     root = root.child(el().key("video").absolute(ox, oy).w(w).h(h).radius(6.0).video(&r.player, SurfaceFit::Fill));
-    if r.crop != FULL {
-        let [cx_, cy, cw, ch] = r.crop;
+    // The crop for Desktop; for a window, where the shot is at the playhead (before zoom).
+    let outline = match r.shot {
+        Source::Desktop => r.crop,
+        _ => r.derived(&s.settings, |p| view::sample(p.views, r.player.time())).map(|v| v as f32),
+    };
+    if outline != FULL {
+        let [cx_, cy, cw, ch] = outline;
         let (x0, y0, x1, y1) = (ox + cx_ * w, oy + cy * h, ox + (cx_ + cw) * w, oy + (cy + ch) * h);
         let shade = Color::BLACK.alpha(0.62);
         let dim = |k: &str, x: f32, y: f32, w: f32, h: f32| el().key(format!("dim-{k}")).absolute(x, y).w(w.max(0.0)).h(h.max(0.0)).fill(shade);
@@ -389,7 +420,7 @@ fn edit_stage(r: &Review, stage: [f32; 2], mut root: El) -> El {
                     .child(el().key(format!("gh{i}")).absolute(x0, y0 + (y1 - y0) * f).w(x1 - x0).h(1.0).fill(ink(0.25)));
             }
         }
-        if let Some([_, _, pw, ph]) = r.crop_px() {
+        if r.shot == Source::Desktop && let Some([_, _, pw, ph]) = r.crop_px() {
             root = root.child(row().key("crop-size").absolute(x0, (y0 - 26.0).max(oy + 4.0)).h(20.0).px(7.0).radius(5.0).center_y()
                 .fill(Color::BLACK.alpha(0.75)).child(text(format!("{pw} × {ph}")).font(type_::MONO_CAPTION).color(Color::WHITE)));
         }
@@ -399,17 +430,16 @@ fn edit_stage(r: &Review, stage: [f32; 2], mut root: El) -> El {
 
 /// The export as it will look: the crop on its background, the video zooming inside it.
 fn preview_stage(s: &Clip, r: &Review, stage: [f32; 2], root: El) -> El {
-    let Some([_, _, cw, ch]) = r.crop_px() else { return edit_stage(r, stage, root) };
+    let (cw, ch) = r.derived(&s.settings, |p| p.size);
     let c = export::canvas(cw, ch, s.settings.background, None);
     let k = (stage[0] / c.w as f32).min(stage[1] / c.h as f32);
     let (w, h) = (c.w as f32 * k, c.h as f32 * k);
     let (ox, oy) = ((stage[0] - w) / 2.0, (stage[1] - h) / 2.0);
     let inner = [ox + c.inner[0] as f32 * k, oy + c.inner[1] as f32 * k, c.inner[2] as f32 * k, c.inner[3] as f32 * k];
     let natural = r.video_px().unwrap_or((16.0, 9.0));
-    let p = Preview { inner, crop: r.crop, natural };
+    let p = Preview { inner, natural };
     r.preview.set(Some(p));
-    let (z, cx, cy) = r.derived(&s.settings, |keys, _| zoom::sample(keys, r.player.time()));
-    let [vx, vy, vw, vh] = video_rect(&p, z, cx, cy);
+    let [vx, vy, vw, vh] = video_rect(&p, r.shown(&s.settings, r.player.time()));
     let mut root = root;
     if s.settings.background != Background::None {
         let (a, b) = s.settings.background.colors();
@@ -430,7 +460,7 @@ fn stage(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
         return root.center().child(text(e).font(type_::BODY).color(ink(0.6)));
     }
     // Rune opens the clip once its surface is mounted, so a surface is always mounted.
-    if r.player.is_playing() && r.grab == Grab::None { preview_stage(s, r, stage, root) } else { edit_stage(r, stage, root) }
+    if r.player.is_playing() && r.grab == Grab::None { preview_stage(s, r, stage, root) } else { edit_stage(s, r, stage, root) }
 }
 
 fn timeline(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
@@ -453,11 +483,21 @@ fn timeline(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
             track = track.child(el().key(format!("film-{c}")).absolute(c as f32 * cell, 0.0).w(cell).h(TIMELINE_H).pixels(image.pixels()).opacity(0.85));
         }
     }
-    let (zoom, idle) = r.derived(&s.settings, |z, i| (z.to_vec(), i.to_vec()));
+    let (zoom, idle) = r.derived(&s.settings, |p| (p.zoom.to_vec(), p.idle.to_vec()));
     for (i, (p, q)) in idle.iter().enumerate() {
         track = track.child(row().key(format!("idle-{i}")).absolute(x(*p), 0.0).w((x(*q) - x(*p)).max(1.0)).h(TIMELINE_H).center()
             .fill(hex("#f5a524").alpha(0.22)).border(1.0, hex("#f5a524").alpha(0.5))
             .child(text(format!("{}×", export::IDLE_SPEED as u32)).font(type_::LABEL).color(Color::WHITE)));
+    }
+    // Which window was in front, as a band, for window shots.
+    if r.shot != Source::Desktop {
+        let focus = &r.track.windows.focus;
+        for (i, &(t, id)) in focus.iter().enumerate() {
+            let end = focus.get(i + 1).map_or(dur, |f| f.0);
+            let on = r.shot == Source::Window(id) || r.shot == Source::Follow;
+            track = track.child(el().key(format!("focus-{i}")).absolute(x(t), 9.0).w((x(end) - x(t) - 1.0).max(1.0)).h(4.0).radius(2.0)
+                .fill(window_color(id).alpha(if on { 0.9 } else { 0.25 })));
+        }
     }
     // Zoomed stretches as a band along the top, clicks as dots.
     let mut k = 0;
@@ -478,6 +518,44 @@ fn timeline(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
         .child(el().key("h-a").absolute(x(a) + 3.0, 16.0).w(4.0).h(TIMELINE_H - 32.0).radius(2.0).fill(Color::WHITE))
         .child(el().key("h-b").absolute((x(b) - 7.0).max(0.0), 16.0).w(4.0).h(TIMELINE_H - 32.0).radius(2.0).fill(Color::WHITE))
         .child(el().key("playhead").absolute(0.0, 0.0).live_offset(&r.playhead).w(2.0).h(TIMELINE_H).fill(Color::WHITE).shadow(0.0, 4.0, Color::BLACK.alpha(0.6)))
+}
+
+/// A steady colour per window, for its stretch of the focus band and its chip's dot.
+fn window_color(id: u32) -> Color {
+    const HUES: [&str; 6] = ["#60a5fa", "#f472b6", "#34d399", "#fbbf24", "#a78bfa", "#fb923c"];
+    hex(HUES[id as usize % HUES.len()])
+}
+
+/// Most windows offered as shots, the ones in front longest.
+const SHOT_WINDOWS: usize = 5;
+
+/// The shot picker: the whole desktop, following focus, or one window.
+fn shots(r: &Review) -> El {
+    let chip = |key: String, on: bool, icon: Option<&Image>, dot: Option<Color>, name: String, shot: Source| {
+        let mut c = row().key(key).h(28.0).px(10.0).gap(7.0).radius(8.0).center_y()
+            .fill(if on { ink(0.14) } else { ink(0.04) }).border(1.0, if on { ink(0.35) } else { ink(0.08) })
+            .on_press_tx(move |s: &mut Clip, tx: &mut Tx| {
+                tx.blur();
+                if let Some(r) = s.review.as_mut() { r.shot = shot }
+            });
+        if let Some(i) = icon { c = c.child(el().size(16.0, 16.0).pixels(i.pixels())) }
+        if let Some(d) = dot { c = c.child(el().size(6.0, 6.0).radius(3.0).fill(d)) }
+        c.child(text(name).font(type_::LABEL).color(if on { Color::WHITE } else { ink(0.7) }))
+    };
+    let windows = &r.track.windows.list;
+    let mut out = row().key("shots").w_full().h(28.0).gap(8.0).center_y()
+        .child(label("Shot"))
+        .child(chip("shot-desktop".into(), r.shot == Source::Desktop, None, None, "Desktop".into(), Source::Desktop))
+        .child(chip("shot-follow".into(), r.shot == Source::Follow, None, None, "Follow focus".into(), Source::Follow));
+    for w in windows.iter().take(SHOT_WINDOWS) {
+        // Name the window by its app, and by its title when the app has several.
+        let same_app = windows.iter().take(SHOT_WINDOWS).filter(|o| o.app == w.app).count() > 1;
+        let mut name = if same_app && !w.title.is_empty() { format!("{} — {}", w.app, w.title) } else { w.app.clone() };
+        if name.chars().count() > 34 { name = name.chars().take(33).collect::<String>() + "…" }
+        let icon = r.icons.iter().find(|(pid, _)| *pid == w.pid).map(|(_, i)| i);
+        out = out.child(chip(format!("shot-{}", w.id), r.shot == Source::Window(w.id), icon, Some(window_color(w.id)), name, Source::Window(w.id)));
+    }
+    out
 }
 
 fn label(t: &str) -> El {
@@ -542,7 +620,9 @@ fn toolbar(s: &Clip, r: &Review) -> El {
         .child(spacer())
         .child(label("Export"))
         .child(SegmentedControl::new(&sizes, size).fit().on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.size = Size::ALL[i]; s.settings.save() }).build(k));
-    col().key("toolbar").w_full().gap(10.0).child(first).child(second)
+    let mut bar = col().key("toolbar").w_full().gap(10.0);
+    if !r.track.windows.list.is_empty() { bar = bar.child(shots(r)) }
+    bar.child(first).child(second)
 }
 
 pub fn view(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {

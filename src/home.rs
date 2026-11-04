@@ -151,7 +151,7 @@ fn home(s: &Clip) -> El {
     let mic_ok = s.mic_ok;
     let sizes: Vec<&str> = Size::ALL.iter().map(|z| z.label()).collect();
     let rows = vec![
-        setting_row("pick", "Choose what to record", "After ⌃ ⌃, click a window or drag an area. Off records the whole screen.",
+        setting_row("pick", "Choose what to record", "Off: ⌃ ⌃ records the whole screen at once. On: click a window or drag an area first.",
             switch(st.pick_area, |s, _| { s.settings.pick_area ^= true; s.settings.save() })),
         setting_row("sys", "System audio", "Record what your Mac plays.", switch(st.system_audio, |s, _| { s.settings.system_audio ^= true; s.settings.save() })),
         setting_row("mic", "Microphone", if mic_ok { "Record your voice over it." } else { "Asks for the microphone first." },

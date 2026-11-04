@@ -23,12 +23,13 @@ fn clamp_center(c: f64, z: f64) -> f64 {
     c.clamp(half, 1.0 - half)
 }
 
-/// The plan for clicks (seconds, x, y normalized to the recording) inside `crop`
-/// (normalized x, y, w, h) and the trim `[from, to]`.
-pub fn plan(clicks: &[(f64, f64, f64)], crop: [f64; 4], from: f64, to: f64) -> Vec<Key> {
+/// The plan for clicks (seconds, x, y normalized to the recording) inside the view at each
+/// click's moment (`view(t)`, normalized x, y, w, h) and the trim `[from, to]`. Keys are in
+/// view fractions, so the zoom rides along with a view that moves.
+pub fn plan(clicks: &[(f64, f64, f64)], view: impl Fn(f64) -> [f64; 4], from: f64, to: f64) -> Vec<Key> {
     let z = LEVEL;
     let inside: Vec<(f64, f64, f64)> = clicks.iter()
-        .map(|&(t, x, y)| (t, (x - crop[0]) / crop[2], (y - crop[1]) / crop[3]))
+        .map(|&(t, x, y)| { let v = view(t); (t, (x - v[0]) / v[2], (y - v[1]) / v[3]) })
         .filter(|&(t, x, y)| t >= from && t <= to && (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y))
         .collect();
     let mut keys = vec![Key { t: from, z: 1.0, cx: 0.5, cy: 0.5 }];

@@ -17,6 +17,8 @@ mod thumbs;
 mod track;
 mod transcode;
 mod ui;
+mod view;
+mod windows;
 mod zoom;
 
 use review::Review;
@@ -223,7 +225,17 @@ impl Clip {
 
     fn load(&mut self, path: PathBuf, has_audio: bool, tx: &mut Tx) {
         trace("file written, opening review");
-        self.review = Some(Review::new(path, self.waker.as_ref(), has_audio));
+        let mut review = Review::new(path, self.waker.as_ref(), has_audio);
+        // Icons for the shot chips, from the apps' bundles (decoded on the image worker).
+        if let Some(images) = &self.images {
+            let mut pids: Vec<i32> = review.track.windows.list.iter().map(|w| w.pid).collect();
+            pids.sort_unstable();
+            pids.dedup();
+            review.icons = pids.into_iter()
+                .filter_map(|pid| Some((pid, images.app_icon(windows::app_path(pid)?, 16.0))))
+                .collect();
+        }
+        self.review = Some(review);
         self.traced_frame = false;
         self.phase = Phase::Review;
         review::load_film(self);
@@ -432,7 +444,7 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     opts.microphone &= permissions::microphone(false) == permissions::Access::Allowed;
                     match capture::start(&raw_dir(), target, opts) {
                         Ok((r, frame)) => {
-                            let tracker = track::Tracker::start(frame, Instant::now());
+                            let tracker = track::Tracker::start(frame, Instant::now(), matches!(target, Target::Display(_)));
                             recording = Some((r, tracker, opts.system_audio || opts.microphone));
                             hud.set_display(DisplayTarget::UnderPointer);
                             hud.update(|h, _| h.since = Some(Instant::now()));

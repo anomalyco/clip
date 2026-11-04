@@ -5,9 +5,6 @@
 use crate::capture::Target;
 use crate::ui::{hex, ink};
 use crate::Clip;
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 use rune::tok::type_;
 use rune::{AppHandle, Color, Cx, Drag, El, KeyEvent, Phase as DragPhase, PointerPress, Tx, el, row, text};
 
@@ -16,7 +13,6 @@ use rune::{AppHandle, Color, Cx, Drag, El, KeyEvent, Phase as DragPhase, Pointer
 pub struct CGRect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 
 unsafe extern "C" {
-    fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const AnyObject;
     fn CGDisplayBounds(display: u32) -> CGRect;
 }
 
@@ -33,30 +29,11 @@ pub struct Win {
     pub rect: [f32; 4],
 }
 
-/// Normal windows on screen, front to back, in `display`'s local points. Bounds are readable
-/// without Screen Recording; Clip's own windows are left out.
+/// Windows on screen, front to back, in `display`'s local points.
 fn windows(display: [f64; 4]) -> Vec<Win> {
-    const ON_SCREEN: u32 = 1 << 0;
-    const NO_DESKTOP: u32 = 1 << 4;
-    let me = std::process::id() as i64;
-    unsafe {
-        let list = CGWindowListCopyWindowInfo(ON_SCREEN | NO_DESKTOP, 0);
-        if list.is_null() { return Vec::new() }
-        let list: Retained<NSArray<NSDictionary<NSString, AnyObject>>> = Retained::from_raw(list as *mut _).expect("non-null");
-        let num = |d: &NSDictionary<NSString, AnyObject>, k: &str| -> Option<f64> {
-            let v = d.objectForKey(&NSString::from_str(k))?;
-            let n: &NSNumber = &*(Retained::as_ptr(&v) as *const NSNumber);
-            Some(n.doubleValue())
-        };
-        list.iter().filter_map(|d| {
-            if num(&d, "kCGWindowLayer")? != 0.0 || num(&d, "kCGWindowOwnerPID")? as i64 == me { return None }
-            let b = d.objectForKey(&NSString::from_str("kCGWindowBounds"))?;
-            let b: &NSDictionary<NSString, AnyObject> = &*(Retained::as_ptr(&b) as *const NSDictionary<NSString, AnyObject>);
-            let (x, y, w, h) = (num(b, "X")?, num(b, "Y")?, num(b, "Width")?, num(b, "Height")?);
-            if w < 40.0 || h < 40.0 { return None }
-            Some(Win { id: num(&d, "kCGWindowNumber")? as u32, rect: [(x - display[0]) as f32, (y - display[1]) as f32, w as f32, h as f32] })
-        }).collect()
-    }
+    crate::windows::on_screen(40.0).into_iter()
+        .map(|w| Win { id: w.id, rect: [(w.rect[0] - display[0]) as f32, (w.rect[1] - display[1]) as f32, w.rect[2] as f32, w.rect[3] as f32] })
+        .collect()
 }
 
 #[derive(Default)]

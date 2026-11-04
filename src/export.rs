@@ -40,8 +40,11 @@ unsafe extern "C" {
 pub struct Plan {
     pub start: f64,
     pub end: f64,
-    /// x, y, w, h in source pixels.
-    pub crop: [u32; 4],
+    /// What the shot shows over time (normalized to the recording), before zoom.
+    pub views: Vec<crate::view::Key>,
+    /// The recording's size and the shot's, in pixels.
+    pub video: (u32, u32),
+    pub size: (u32, u32),
     /// Scale the output down to fit this (long edge, short edge), when set.
     pub fit: Option<(u32, u32)>,
     /// Overall playback speed.
@@ -153,13 +156,21 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
-/// The transform that shows the zoomed part of the crop in the canvas's inner rect.
-fn transform(crop: [u32; 4], canvas: &Canvas, z: f64, cx: f64, cy: f64) -> CGAffineTransform {
-    let [x, y, w, h] = crop.map(|v| v as f64);
-    let [vx, vy, vw, _] = zoom::viewport(z, cx, cy);
-    let k = canvas.inner[2] / (w * vw);
-    let (left, top) = (x + vx * w, y + vy * h);
-    CGAffineTransform { a: k, b: 0.0, c: 0.0, d: k, tx: canvas.inner[0] - left * k, ty: canvas.inner[1] - top * k }
+/// The transform that shows `rect` (the recording's pixels) in the canvas's inner rect,
+/// fitted and centred.
+fn transform(rect: [f64; 4], canvas: &Canvas) -> CGAffineTransform {
+    let [x, y, w, h] = rect;
+    let [ix, iy, iw, ih] = canvas.inner;
+    let k = (iw / w).min(ih / h);
+    let (ox, oy) = (ix + (iw - w * k) / 2.0, iy + (ih - h * k) / 2.0);
+    CGAffineTransform { a: k, b: 0.0, c: 0.0, d: k, tx: ox - x * k, ty: oy - y * k }
+}
+
+/// The recording's pixels the shot shows at source time `t`.
+pub fn shown_px(plan: &Plan, t: f64) -> [f64; 4] {
+    let r = crate::view::shown(crate::view::sample(&plan.views, t), zoom::sample(&plan.zoom, t));
+    let (w, h) = (plan.video.0 as f64, plan.video.1 as f64);
+    [r[0] * w, r[1] * h, r[2] * w, r[3] * h]
 }
 
 /// A Core Animation layer of `class` with `frame`.
@@ -250,15 +261,11 @@ fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
 
         // Crop, scale and zoom.
         let fit = if small { Some(GIF_BOX) } else { plan.fit };
-        let [_, _, cw, ch] = plan.crop;
-        let canvas = canvas(cw, ch, plan.background, fit);
+        let canvas = canvas(plan.size.0, plan.size.1, plan.background, fit);
         let layer_ins: Retained<AnyObject> = msg_send![class!(AVMutableVideoCompositionLayerInstruction), videoCompositionLayerInstructionWithAssetTrack: &*comp_video];
-        let at = |tau: f64| {
-            let (z, cx, cy) = zoom::sample(&plan.zoom, source_at(&segs, tau));
-            transform(plan.crop, &canvas, z, cx, cy)
-        };
+        let at = |tau: f64| transform(shown_px(plan, source_at(&segs, tau)), &canvas);
         let _: () = msg_send![&layer_ins, setTransform: at(0.0), atTime: time(0.0)];
-        if plan.zoom.len() > 1 {
+        if plan.zoom.len() > 1 || plan.views.len() > 1 {
             // Ramps every 1/15 s where the zoom moves; equal neighbours merge into holds.
             const STEP: f64 = 1.0 / 15.0;
             let mut tau = 0.0;
@@ -292,8 +299,7 @@ fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
 fn session(built: &Built, plan: &Plan, out: &Path, intermediate: bool, done: mpsc::Sender<()>) -> Result<Retained<AnyObject>, String> {
     let Built { composition, video: composer } = built;
     autoreleasepool(|_| unsafe {
-        let [_, _, cw, ch] = plan.crop;
-        let canvas = canvas(cw, ch, plan.background, plan.fit);
+        let canvas = canvas(plan.size.0, plan.size.1, plan.background, plan.fit);
         let preset = if intermediate { "AVAssetExportPresetAppleProRes4444LPCM" }
             else if canvas.w > H264_MAX.0 || canvas.h > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" }
             else { "AVAssetExportPresetHighestQuality" };
@@ -314,8 +320,7 @@ fn session(built: &Built, plan: &Plan, out: &Path, intermediate: bool, done: mps
 pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let name = format!("Clip {}", stamp());
-    let [_, _, cw, ch] = plan.crop;
-    let size = { let c = canvas(cw, ch, plan.background, plan.fit); (c.w, c.h) };
+    let size = { let c = canvas(plan.size.0, plan.size.1, plan.background, plan.fit); (c.w, c.h) };
     let bitrate = if plan.gif { None } else { plan.quality.bitrate(size.0, size.1, plan.fps) };
     let final_movie = dir.join(format!("{name}.mp4"));
     let built = build(source, plan, plan.gif)?;
