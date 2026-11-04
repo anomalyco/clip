@@ -6,13 +6,17 @@
 
 use crate::settings::{Background, Quality};
 use crate::zoom::{self, Key};
+#[cfg(target_os = "macos")]
 use objc2::rc::{Retained, autoreleasepool};
+#[cfg(target_os = "macos")]
 use objc2::runtime::{AnyObject, Bool};
+#[cfg(target_os = "macos")]
 use objc2::{class, msg_send};
+#[cfg(target_os = "macos")]
 use objc2_core_media::{CMTime, CMTimeRange};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSError, NSString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Everything the export needs, in the raw movie's pixels and seconds.
 #[derive(Clone, Debug)]
@@ -40,7 +44,9 @@ pub struct Plan {
 }
 
 pub const IDLE_SPEED: f64 = 4.0;
+#[cfg(target_os = "macos")]
 const GIF_FPS: i32 = 15;
+#[cfg(target_os = "macos")]
 const GIF_BOX: (u32, u32) = (800, 800);
 
 /// `w` × `h` scaled down (never up) to fit `bounds`, even on both sides.
@@ -120,19 +126,30 @@ fn source_at(segs: &[(f64, f64, f64)], tau: f64) -> f64 {
     segs.last().map_or(0.0, |s| s.1)
 }
 
+/// The local time for the export's name, as the Finder names screenshots.
+#[cfg(target_os = "macos")]
 fn stamp() -> String {
-    let out = Command::new("date").arg("+%Y-%m-%d at %H.%M.%S").output().ok();
+    let out = std::process::Command::new("date").arg("+%Y-%m-%d at %H.%M.%S").output().ok();
     out.and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).unwrap_or_else(|| "clip".into())
 }
 
+#[cfg(windows)]
+fn stamp() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!("{:04}-{:02}-{:02} at {:02}.{:02}.{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+}
+
+#[cfg(target_os = "macos")]
 fn ns(s: &str) -> Retained<NSString> {
     NSString::from_str(s)
 }
 
+#[cfg(target_os = "macos")]
 fn time(seconds: f64) -> CMTime {
     unsafe { CMTime::new((seconds * 6000.0).round() as i64, 6000) }
 }
 
+#[cfg(target_os = "macos")]
 fn range(start: f64, length: f64) -> CMTimeRange {
     CMTimeRange { start: time(start), duration: time(length.max(0.0)) }
 }
@@ -161,6 +178,7 @@ pub fn frame_radius(canvas: &Canvas, corner: f64, video: (u32, u32), shown: [f64
 
 /// The recording's sound tracks, trimmed and each stretch scaled to its speed, as the
 /// GPU export's sound (src/pipeline.rs).
+#[cfg(target_os = "macos")]
 pub fn audio_composition(asset: &AnyObject, plan: &Plan) -> Result<Retained<AnyObject>, String> {
     autoreleasepool(|_| unsafe {
         let audio: Retained<NSArray<AnyObject>> = msg_send![asset, tracksWithMediaType: &*ns("soun")];
@@ -187,10 +205,21 @@ pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Re
     let name = format!("Clip {}", stamp());
     if plan.gif {
         let gif = dir.join(format!("{name}.gif"));
-        crate::pipeline::gif(source, plan, &gif, GIF_FPS as f64, GIF_BOX, &progress)?;
-        return Ok(gif);
+        #[cfg(target_os = "macos")]
+        {
+            crate::pipeline::gif(source, plan, &gif, GIF_FPS as f64, GIF_BOX, &progress)?;
+            return Ok(gif);
+        }
+        #[cfg(windows)]
+        {
+            let _ = gif;
+            return Err("GIF export isn't on Windows yet".into());
+        }
     }
     let movie = dir.join(format!("{name}.mp4"));
+    #[cfg(target_os = "macos")]
     crate::pipeline::export(source, plan, &movie, &progress)?;
+    #[cfg(windows)]
+    crate::pipeline_windows::export(source, plan, &movie, &progress)?;
     Ok(movie)
 }

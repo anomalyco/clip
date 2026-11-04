@@ -1,9 +1,10 @@
-// Compiles the Objective-C permission guide (native/permission_guide.m) with ARC.
+// Compiles the Objective-C permission guide (native/permission_guide.m) with ARC, on macOS.
 fn main() {
     println!("cargo:rerun-if-changed=native/permission_guide.m");
     // The release's version and channel (scripts/bundle.sh), for the updater.
     println!("cargo:rerun-if-env-changed=CLIP_VERSION");
     println!("cargo:rerun-if-env-changed=CLIP_BUILD_CHANNEL");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") { return }
     cc::Build::new()
         .file("native/permission_guide.m")
         .flag("-fobjc-arc")

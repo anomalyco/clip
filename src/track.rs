@@ -4,23 +4,34 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1;
+#[cfg(target_os = "macos")]
 const LEFT_DOWN: u32 = 1;
+#[cfg(target_os = "macos")]
 const MOUSE_MOVED: u32 = 5;
+#[cfg(target_os = "macos")]
 const LEFT_DRAGGED: u32 = 6;
+#[cfg(target_os = "macos")]
 const KEY_DOWN: u32 = 10;
+#[cfg(target_os = "macos")]
 const SCROLL: u32 = 22;
 /// Busy moments closer than this merge; a gap at least this long is idle.
 pub const IDLE_GAP: f64 = 1.5;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CGPoint { x: f64, y: f64 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGEventSourceCounterForEventType(state: i32, kind: u32) -> u32;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
@@ -28,6 +39,7 @@ unsafe extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
+#[cfg(target_os = "macos")]
 pub fn pointer() -> (f64, f64) {
     unsafe {
         let e = CGEventCreate(std::ptr::null());
@@ -83,12 +95,14 @@ impl Track {
     }
 }
 
-/// Watches until `stop` is set, then returns what it saw.
+/// Watches until `stop` is set, then returns what it saw (src/track_windows.rs on Windows).
+#[cfg(target_os = "macos")]
 pub struct Tracker {
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<Track>,
 }
 
+#[cfg(target_os = "macos")]
 impl Tracker {
     /// `windows`: also log the windows over `frame` (for a whole-screen recording).
     pub fn start(frame: [f64; 4], t0: Instant, windows: bool) -> Tracker {
@@ -143,11 +157,13 @@ impl Tracker {
 
 /// Darkest a pixel outside a window's corner can be and still count as empty (the encoder
 /// leaves the black a little noisy).
+#[cfg(target_os = "macos")]
 const EMPTY: u8 = 12;
 
 /// A window recording's corner radius in pixels: the longest run of black along an edge from
 /// any of a frame's four corners, which is how far the window's rounded corner leaves the
 /// edge empty. Capped at a fifth of the short side, in case the window itself is black there.
+#[cfg(target_os = "macos")]
 fn window_corner(raw: &Path) -> f64 {
     let Some(f) = crate::thumbs::frames(raw, &[0.5], (16384.0, 16384.0)).pop().flatten() else { return 0.0 };
     let (w, h) = (f.w as usize, f.h as usize);
