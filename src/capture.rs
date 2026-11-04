@@ -95,17 +95,46 @@ pub struct Recording {
 // SAFETY: SCStream is stopped from one thread at a time; ScreenCaptureKit calls the watcher on its own queue.
 unsafe impl Send for Recording {}
 
-fn wait_for(rx: &mpsc::Receiver<Option<String>>, what: &str) -> Result<(), String> {
-    match rx.recv_timeout(TIMEOUT) {
-        Ok(None) => Ok(()),
-        Ok(Some(e)) => Err(format!("{what}: {e}")),
-        Err(_) => Err(format!("{what}: ScreenCaptureKit didn't answer")),
+/// Why a recording couldn't start.
+#[derive(Debug)]
+pub enum StartError {
+    /// macOS refused: Screen Recording isn't allowed for this Clip (or not yet usable).
+    NotAllowed,
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::NotAllowed => f.write_str("Screen Recording isn't allowed for Clip"),
+            StartError::Failed(e) => f.write_str(e),
+        }
     }
 }
 
-fn completion(tx: mpsc::Sender<Option<String>>) -> RcBlock<dyn Fn(*mut NSError)> {
+impl From<String> for StartError {
+    fn from(e: String) -> Self { StartError::Failed(e) }
+}
+
+impl From<&str> for StartError {
+    fn from(e: &str) -> Self { StartError::Failed(e.into()) }
+}
+
+/// SCStreamErrorUserDeclined: no Screen Recording permission.
+const USER_DECLINED: isize = -3801;
+
+fn wait_for(rx: &mpsc::Receiver<Option<(String, isize)>>, what: &str) -> Result<(), StartError> {
+    match rx.recv_timeout(TIMEOUT) {
+        Ok(None) => Ok(()),
+        Ok(Some((_, USER_DECLINED))) => Err(StartError::NotAllowed),
+        Ok(Some((e, _))) => Err(StartError::Failed(format!("{what}: {e}"))),
+        Err(_) => Err(StartError::Failed(format!("{what}: ScreenCaptureKit didn't answer"))),
+    }
+}
+
+fn completion(tx: mpsc::Sender<Option<(String, isize)>>) -> RcBlock<dyn Fn(*mut NSError)> {
     RcBlock::new(move |error: *mut NSError| {
-        let _ = tx.send(unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string()));
+        let _ = tx.send(unsafe { error.as_ref() }.map(|e| (e.localizedDescription().to_string(), e.code())));
     })
 }
 
@@ -143,9 +172,12 @@ pub enum Target {
 }
 
 /// Start recording `target` at full backing resolution into `dir`. Returns the recording and
-/// the recorded area in global points, for mapping clicks into it.
-pub fn start(dir: &Path, target: Target, opts: Options) -> Result<(Recording, [f64; 4]), String> {
-    let content = shareable_content().map_err(|e| format!("Screen Recording permission is needed ({e})"))?;
+/// the recorded area in global points, for mapping clicks into it. This, not
+/// `CGPreflightScreenCaptureAccess` (which keeps its first answer for the life of the
+/// process), is what tells whether Clip may record.
+pub fn start(dir: &Path, target: Target, opts: Options) -> Result<(Recording, [f64; 4]), StartError> {
+    // Listing the shareable content is the first thing macOS refuses without permission.
+    let content = shareable_content().map_err(|_| StartError::NotAllowed)?;
     let displays = unsafe { content.displays() };
     let display_for = |id: u32| displays.iter().find(|d| unsafe { d.displayID() } == id).or_else(|| displays.firstObject()).ok_or("no display");
     let pid = std::process::id() as i32;
@@ -230,7 +262,7 @@ impl Recording {
     pub fn stop(self) -> Result<PathBuf, String> {
         let (tx, rx) = mpsc::channel();
         unsafe { self.stream.stopCaptureWithCompletionHandler(Some(&completion(tx))) };
-        wait_for(&rx, "stop capture")?;
+        wait_for(&rx, "stop capture").map_err(|e| e.to_string())?;
         match self.finished.recv_timeout(TIMEOUT) {
             Ok(Ok(())) => Ok(self.path),
             Ok(Err(e)) => Err(format!("recording failed: {e}")),

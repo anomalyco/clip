@@ -165,10 +165,6 @@ impl Clip {
 
     /// The double tap: the picker, or straight to recording the screen under the pointer.
     fn begin(&mut self, tx: &mut Tx) {
-        if !permissions::screen_usable() {
-            self.start(Target::Display(capture::pointer_display()), tx);
-            return;
-        }
         let display = capture::pointer_display();
         if !self.settings.pick_area {
             self.start(Target::Display(display), tx);
@@ -194,14 +190,10 @@ impl Clip {
         }
     }
 
+    /// Starts recording. Whether macOS allows it is ScreenCaptureKit's answer (the worker
+    /// opens the permissions step when it refuses), never this process's cached preflight:
+    /// that keeps its first answer, so it said no to a Clip allowed after it launched.
     fn start(&mut self, target: Target, tx: &mut Tx) {
-        if !permissions::screen_usable() {
-            // Show why: the permissions step, wherever setup was.
-            self.settings.setup = Setup::Permissions;
-            self.settings.save();
-            self.show(tx);
-            return;
-        }
         self.review = None;
         tx.close_window();
         self.phase = Phase::Starting;
@@ -267,6 +259,7 @@ impl Clip {
 
     pub fn set_setup(&mut self, setup: Setup, tx: &mut Tx) {
         self.settings.setup = setup;
+        self.settings.onboarded |= setup == Setup::Done;
         self.settings.save();
         self.refresh_access();
         let size = if setup == Setup::Done { home::HOME_SIZE } else { home::SETUP_SIZE };
@@ -454,7 +447,13 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                                 menubar::set_recording(true);
                             });
                         }
-                        Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
+                        Err(capture::StartError::NotAllowed) => me.update(|s, tx| {
+                            s.phase = Phase::Idle;
+                            s.settings.setup = Setup::Permissions;
+                            s.settings.save();
+                            s.show(tx);
+                        }),
+                        Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e.to_string()); s.show(tx) }),
                     }
                 }
                 Cmd::Stop => {
@@ -609,12 +608,19 @@ fn main() {
         // waits for ⌃ ⌃. A Clip that can't record (a new build's identity, or access taken
         // away) opens on the permissions step instead of failing at the first double tap.
         None if first_run => opener.update(|s, tx| s.show(tx)),
-        None if !permissions::screen_usable() => opener.update(|s, tx| {
-            s.settings.setup = Setup::Permissions;
-            s.settings.save();
-            s.show(tx);
-        }),
-        None => {}
+        // Asked of a fresh Clip process, off the main thread: it reads the grant as it is now.
+        None => {
+            let me = opener.clone();
+            std::thread::spawn(move || {
+                if !permissions::screen_allowed_now() {
+                    me.update(|s, tx| {
+                        s.settings.setup = Setup::Permissions;
+                        s.settings.save();
+                        s.show(tx);
+                    });
+                }
+            });
+        }
     }
     app.run();
 }

@@ -48,6 +48,14 @@ pub fn screen_check_main() -> ! {
     std::process::exit(if unsafe { CGPreflightScreenCaptureAccess() } { 0 } else { 1 })
 }
 
+/// Whether Screen Recording is allowed for Clip right now: this process's answer, else a
+/// fresh Clip's (`--screen-check`). Blocks for the child's run; call off the UI thread.
+pub fn screen_allowed_now() -> bool {
+    screen_usable() || std::env::current_exe().ok()
+        .and_then(|exe| std::process::Command::new(exe).arg("--screen-check").status().ok())
+        .is_some_and(|s| s.success())
+}
+
 pub fn screen_usable() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }
 }

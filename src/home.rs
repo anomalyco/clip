@@ -102,7 +102,7 @@ fn permissions_step(s: &Clip) -> El {
         .child(card(rows));
     let ready = screen == Access::Allowed;
     let next = Button::new("Continue").variant(ButtonVariant::Contrast).disabled(!ready)
-        .on_press_tx(|s: &mut Clip, tx: &mut Tx| s.set_setup(Setup::TryIt, tx)).build(kit());
+        .on_press_tx(|s: &mut Clip, tx: &mut Tx| s.set_setup(if s.settings.onboarded { Setup::Done } else { Setup::TryIt }, tx)).build(kit());
     page(body, next, Some(1))
 }
 

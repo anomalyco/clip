@@ -128,13 +128,16 @@ pub struct Settings {
     pub fps: u32,
     /// One-time changes already applied to this file (see `migrate`).
     pub version: u32,
+    /// The first run finished once: a later trip to the permissions step (a new build, a
+    /// grant taken away) goes back home after it, not through Try it again.
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self { setup: Setup::Welcome, system_audio: false, microphone: false, show_clicks: true, sounds: true, size: Size::Original,
             pick_area: false, zoom: true, skip_idle: false, speed: 1.0, background: Background::None,
-            quality: Quality::Standard, fps: 60, version: VERSION }
+            quality: Quality::Standard, fps: 60, version: VERSION, onboarded: false }
     }
 }
 
@@ -147,6 +150,7 @@ const VERSION: u32 = 1;
 impl Settings {
     pub fn load() -> Self {
         let mut s: Settings = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        s.onboarded |= s.setup == Setup::Done;
         s.migrate();
         s
     }
