@@ -54,27 +54,76 @@ pub fn megabytes(bytes: u64) -> String {
     if bytes >= 1_000_000 { format!("{:.1} MB", bytes as f64 / 1e6) } else { format!("{} KB", bytes / 1000) }
 }
 
-/// Windows and Linux: Clip's title bar, as macOS draws Clip's window. A strip across the top
-/// that moves the window (a double press maximizes) and close, minimize and zoom lights where
-/// macOS 26 puts its own, showing their symbols while the pointer is over them.
+/// Windows and Linux: Clip's title bar, drawn by Clip in each platform's own manner, as
+/// macOS draws Clip's content under its traffic lights. A strip across the top band moves the
+/// window (a double press maximizes), with the window buttons at the right: Windows 11's flat
+/// caption buttons (close turns red under the pointer), GNOME's round header-bar buttons on
+/// Linux. The symbols are drawn from lines, so no font decides how they look.
 #[cfg(not(target_os = "macos"))]
 pub fn titlebar() -> El {
-    use rune::{Chrome, Tx};
-    let rects = Chrome::DEFAULT.traffic_light_rects().expect("full-size content has lights");
-    let light = |key: &'static str, color: &str, glyph: &'static str, act: fn(&mut Tx)| {
-        let size = Chrome::TRAFFIC_LIGHT;
-        el().key(key).size(size, size).radius(size / 2.0).fill(hex(color)).border(0.5, Color::BLACK.alpha(0.25))
-            .center()
-            .child(text(glyph).font(TextStyle::new(11.0, 700.0)).color(Color::BLACK.alpha(0.55)).group_opacity(0.0, 1.0))
-            .on_press_tx(move |_: &mut crate::Clip, tx: &mut Tx| act(tx))
-    };
-    let lights = row().key("lights").absolute(rects[0][0], rects[0][1]).gap(Chrome::TRAFFIC_PITCH - Chrome::TRAFFIC_LIGHT).hover_group()
-        .child(light("light-close", "#ff5f57", "×", |tx| tx.close_window()))
-        .child(light("light-minimize", "#febc2e", "−", |tx| tx.minimize()))
-        .child(light("light-zoom", "#28c840", "+", |_| {}));
-    el().key("titlebar").absolute(0.0, 0.0).w_full().h(TITLEBAR).window_drag().child(lights)
+    row().key("titlebar").absolute(0.0, 0.0).w_full().h(TITLEBAR).justify_end().center_y().gap(BUTTON_GAP).pr(BUTTON_INSET)
+        .window_drag()
+        .child(window_button("minimize", minimize_glyph(), false, |tx| tx.minimize()))
+        .child(window_button("maximize", maximize_glyph(), false, |_| {}))
+        .child(window_button("close", close_glyph(), true, |tx| tx.close_window()))
 }
 
 /// The band at the top of every window the title bar (or macOS's) sits in.
 #[cfg(not(target_os = "macos"))]
 const TITLEBAR: f32 = 36.0;
+
+/// Windows 11: caption buttons 46 wide, the bar's full height, flush with the corner.
+#[cfg(windows)]
+const BUTTON_GAP: f32 = 0.0;
+#[cfg(windows)]
+const BUTTON_INSET: f32 = 0.0;
+/// GNOME: round buttons with a little space between them and the edge.
+#[cfg(target_os = "linux")]
+const BUTTON_GAP: f32 = 8.0;
+#[cfg(target_os = "linux")]
+const BUTTON_INSET: f32 = 8.0;
+
+/// A line `w` long and one pixel thick, turned `angle` radians about its middle.
+#[cfg(not(target_os = "macos"))]
+fn stroke(w: f32, angle: f32) -> El {
+    el().absolute(0.0, 0.0).w_full().h_full().center().child(el().w(w).h(1.0).fill(ink(0.9)).rotate(angle))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn glyph() -> El {
+    el().size(12.0, 12.0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn minimize_glyph() -> El {
+    // Windows centres it; GNOME sets it low, as its symbolic icon does.
+    let y = if cfg!(windows) { 5.5 } else { 8.5 };
+    glyph().child(el().absolute(1.0, y).w(10.0).h(1.0).fill(ink(0.9)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maximize_glyph() -> El {
+    let r = if cfg!(windows) { 1.0 } else { 1.5 };
+    glyph().child(el().absolute(1.5, 1.5).size(9.0, 9.0).radius(r).border(1.0, ink(0.9)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn close_glyph() -> El {
+    let quarter = std::f32::consts::FRAC_PI_4;
+    glyph().child(stroke(13.0, quarter)).child(stroke(13.0, -quarter))
+}
+
+#[cfg(windows)]
+fn window_button(key: &'static str, glyph: El, close: bool, act: fn(&mut rune::Tx)) -> El {
+    el().key(key).w(46.0).h(TITLEBAR).center().child(glyph)
+        .hover(if close { hex("#c42b1c") } else { ink(0.08) })
+        .press(if close { hex("#c42b1c").alpha(0.8) } else { ink(0.05) })
+        .on_press_tx(move |_: &mut crate::Clip, tx: &mut rune::Tx| act(tx))
+}
+
+#[cfg(target_os = "linux")]
+fn window_button(key: &'static str, glyph: El, _close: bool, act: fn(&mut rune::Tx)) -> El {
+    el().key(key).size(24.0, 24.0).radius(12.0).fill(ink(0.1)).center().child(glyph)
+        .hover(ink(0.06)).press(ink(0.12))
+        .on_press_tx(move |_: &mut crate::Clip, tx: &mut rune::Tx| act(tx))
+}
