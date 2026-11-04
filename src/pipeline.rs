@@ -383,6 +383,7 @@ pub struct Frames {
 impl Frames {
     /// Opens `source` at `from` seconds and uploads the frame showing then.
     pub fn open(source: &Path, from: f64, renderer: &mut Renderer) -> Result<Frames, String> {
+        if !source.is_file() { return Err("the recording is gone".into()) }
         autoreleasepool(|_| {
             let url = NSURL::fileURLWithPath(&ns(source.to_str().ok_or("path")?));
             let asset: Retained<AnyObject> = unsafe { msg_send![class!(AVURLAsset), URLAssetWithURL: &*url, options: std::ptr::null::<AnyObject>()] };

@@ -91,6 +91,8 @@ struct Hud {
 }
 
 const TOAST: Duration = Duration::from_millis(1600);
+/// The error bar's height, along the window's bottom.
+const ERROR_BAR: f32 = 32.0;
 const RETAKE_GUARD: Duration = Duration::from_millis(900);
 /// Raw recordings kept in Caches; older ones are deleted when a new one starts.
 const KEEP_RAW: usize = 4;
@@ -196,6 +198,7 @@ impl Clip {
         }
         self.review = Some(review);
         self.traced_frame = false;
+        self.error = None;
         self.phase = Phase::Review;
         review::load_film(self);
         tx.resize_window_instant(review::SIZE);
@@ -309,7 +312,11 @@ impl Clip {
     pub fn export(&mut self, gif: bool) {
         if self.phase != Phase::Review { return }
         let Some(r) = &self.review else { return };
-        let Some(plan) = r.plan(&self.settings, gif) else { return };
+        // No plan while the first frame hasn't decoded, or the player failed (reported already).
+        let Some(plan) = r.plan(&self.settings, gif) else {
+            if !r.failed.get() { self.error = Some("The recording hasn't loaded yet".into()) }
+            return;
+        };
         r.player.pause();
         let source = r.source.clone();
         self.export_plan(source, plan);
@@ -321,18 +328,22 @@ impl Clip {
         let (me, sounds) = (self.me.clone(), self.settings.sounds);
         std::thread::spawn(move || {
             let progress = me.clone();
-            let result = export::run(&source, &plan, &clips_dir(), move |f| {
-                progress.update_if(move |s, _| {
-                    let Phase::Exporting(old) = s.phase else { return false };
-                    // Redraw only when the shown percent changes.
-                    s.phase = Phase::Exporting(f);
-                    (old * 100.0) as u32 != (f * 100.0) as u32
-                });
-            });
+            // A panic in the export must still end the Exporting phase.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                export::run(&source, &plan, &clips_dir(), move |f| {
+                    progress.update_if(move |s, _| {
+                        let Phase::Exporting(old) = s.phase else { return false };
+                        // Redraw only when the shown percent changes.
+                        s.phase = Phase::Exporting(f);
+                        (old * 100.0) as u32 != (f * 100.0) as u32
+                    });
+                })
+            })).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
             me.update(move |s, tx| match result {
                 Ok(path) => {
                     tx.copy_rich(ClipboardContent::default().with_files([path.clone()]));
                     if sounds { sound::play(sound::Cue::Copied) }
+                    s.error = None;
                     s.phase = Phase::Copied(path);
                     let me = s.me.clone();
                     std::thread::spawn(move || {
@@ -341,7 +352,8 @@ impl Clip {
                     });
                 }
                 Err(e) => {
-                    s.phase = Phase::Review;
+                    // The review may have been closed while it exported.
+                    s.phase = if s.review.is_some() { Phase::Review } else { Phase::Idle };
                     s.error = Some(e);
                 }
             });
@@ -481,6 +493,13 @@ fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
         s.traced_frame = true;
         trace("video loaded");
     }
+    // The player's thread ending on an error: say so once, and stop the clock it left running.
+    if let Some(r) = &s.review && !r.failed.get() && let rune::PlayerState::Failed(e) = r.player.state() {
+        r.failed.set(true);
+        r.player.pause();
+        s.error = Some(format!("Can't play the recording: {e}"));
+        changed = true;
+    }
     // Playback moves only live values: keep polling each frame, but don't rebuild the view.
     if s.review.as_ref().is_some_and(|r| r.follow(&s.settings)) {
         tx.wake_after(Duration::from_millis(16));
@@ -512,9 +531,11 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     // Windows and Linux: Clip's own title bar over the band the views leave for macOS's.
     #[cfg(not(target_os = "macos"))]
     let body = el().w_full().h_full().child(body.w_full().h_full()).child(ui::titlebar());
+    // The bar is pinned over the body's bottom padding: the home window has no room to give
+    // up, so in the flow it got a few pixels and the message was unreadable.
     match &s.error {
-        Some(e) => rune::col().w_full().h_full().child(body.grow(1.0))
-            .child(row().key("error").w_full().h(32.0).px(16.0).center_y().fill(hex("#3a1416"))
+        Some(e) => el().w_full().h_full().child(body.w_full().h_full().pb(ERROR_BAR))
+            .child(row().key("error").pin(Some(0.0), None, Some(0.0), Some(0.0)).h(ERROR_BAR).px(16.0).center_y().fill(hex("#3a1416"))
                 .child(text(e.clone()).font(type_::BODY).color(Color::WHITE))
                 .on_press(|s: &mut Clip| s.error = None)),
         None => body,

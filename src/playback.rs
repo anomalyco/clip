@@ -74,8 +74,9 @@ fn duration(path: &Path) -> Option<f64> {
 }
 
 impl Playback {
-    /// Opens `path`, paused at its start. The first frame decodes on the player's thread.
-    pub fn file(path: &Path) -> Playback {
+    /// Opens `path`, paused at its start. The first frame decodes on the player's thread;
+    /// `wake` is called when that thread ends on an error, so the window shows it.
+    pub fn file(path: &Path, wake: Option<rune::Waker>) -> Playback {
         let duration = duration(path).unwrap_or(0.0);
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -87,8 +88,15 @@ impl Playback {
         });
         let pixels = Pixels::new();
         let (thread_shared, thread_pixels, thread_path) = (shared.clone(), pixels.clone(), path.to_path_buf());
-        let spawned = std::thread::Builder::new().name("clip-playback".into())
-            .spawn(move || run(&thread_shared, &thread_pixels, &thread_path));
+        let spawned = std::thread::Builder::new().name("clip-playback".into()).spawn(move || {
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&thread_shared, &thread_pixels, &thread_path))).is_err();
+            let quit = {
+                let mut s = thread_shared.lock();
+                if crashed && s.failed.is_none() { s.failed = Some("the player stopped".into()) }
+                s.quit
+            };
+            if !quit && let Some(wake) = wake { wake() }
+        });
         if let Err(e) = spawned { shared.lock().failed = Some(e.to_string()) }
         Playback {
             shared,
