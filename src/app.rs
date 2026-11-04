@@ -183,7 +183,6 @@ impl Clip {
         let _ = self.worker.send(Cmd::Stop);
     }
 
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     fn load(&mut self, path: PathBuf, has_audio: bool, tx: &mut Tx) {
         trace("file written, opening review");
         let mut review = Review::new(path, self.waker.as_ref(), has_audio);
@@ -316,15 +315,6 @@ impl Clip {
         self.export_plan(source, plan);
     }
 
-    /// A take just stopped, with no review to open (Linux): export it as the settings say.
-    #[cfg(target_os = "linux")]
-    pub fn export_raw(&mut self, path: PathBuf) {
-        let Some(probe) = thumbs::probe(&path) else { self.error = Some("couldn't read the recording".into()); return };
-        let track = track::Track::load(&path);
-        let plan = export::plan_default(&track, &self.settings, (probe.w, probe.h), probe.duration, false);
-        self.export_plan(path, plan);
-    }
-
     /// Exports `plan` of `source` on a thread, copies the file and shows Copied for a moment.
     fn export_plan(&mut self, source: PathBuf, plan: export::Plan) {
         self.phase = Phase::Exporting(0.0);
@@ -343,8 +333,6 @@ impl Clip {
                 Ok(path) => {
                     tx.copy_rich(ClipboardContent::default().with_files([path.clone()]));
                     if sounds { sound::play(sound::Cue::Copied) }
-                    #[cfg(target_os = "linux")]
-                    notify(&format!("Saved {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
                     s.phase = Phase::Copied(path);
                     let me = s.me.clone();
                     std::thread::spawn(move || {
@@ -391,14 +379,6 @@ impl Clip {
             });
         });
     }
-}
-
-/// A desktop notification, through notify-send when it's there: on Linux the export runs
-/// with no window open, so this is how a finished clip is announced.
-#[cfg(target_os = "linux")]
-fn notify(body: &str) {
-    let _ = std::process::Command::new("notify-send").args(["--app-name=Clip", "Clip", body])
-        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 /// Keeps the newest few raw recordings and deletes the rest.
@@ -457,10 +437,7 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     match r.stop() {
                         Ok(path) => {
                             tracker.finish(&path, window);
-                            #[cfg(target_os = "macos")]
                             me.update(move |s, tx| s.load(path, audio, tx));
-                            #[cfg(target_os = "linux")]
-                            { let _ = audio; me.update(move |s, _| s.export_raw(path)) }
                         }
                         Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
                     }
@@ -638,11 +615,7 @@ fn app_main() {
         updater::start(move |status| me.update(move |_, _| menubar::set_update(&status)));
     }
     match open {
-        #[cfg(target_os = "macos")]
         Some(path) => opener.update(move |s, tx| s.load(path, true, tx)),
-        // No review on Linux: an opened recording is exported as a stopped take is.
-        #[cfg(target_os = "linux")]
-        Some(path) => opener.update(move |s, _| s.export_raw(path)),
         // The first run opens the window; after it, Clip starts silently in the menu bar and
         // waits for ⌃ ⌃. A Clip that can't record (a new build's identity, or access taken
         // away) opens on the permissions step instead of failing at the first double tap.
