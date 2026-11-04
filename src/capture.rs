@@ -1,0 +1,190 @@
+//! Record the display under the pointer to a movie with ScreenCaptureKit's SCRecordingOutput
+//! (macOS 15+): Apple encodes and writes the file, so no frame passes through this process.
+//! Clip's own windows (the review window, the recording pill) are left out of the capture.
+
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{AllocAnyThread, DefinedClass, Message, define_class};
+use objc2_core_media::CMTime;
+use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCRecordingOutput, SCRecordingOutputConfiguration, SCRecordingOutputDelegate,
+    SCShareableContent, SCStream, SCStreamConfiguration,
+};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, mpsc};
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+const FPS: i32 = 60;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint { x: f64, y: f64 }
+
+unsafe extern "C" {
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    fn CFRelease(cf: *mut std::ffi::c_void);
+    fn CGGetDisplaysWithPoint(point: CGPoint, max: u32, displays: *mut u32, count: *mut u32) -> i32;
+    fn CGMainDisplayID() -> u32;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// The display the pointer is on.
+fn pointer_display() -> u32 {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() { return CGMainDisplayID(); }
+        let point = CGEventGetLocation(event);
+        CFRelease(event);
+        let (mut id, mut count) = (0u32, 0u32);
+        if CGGetDisplaysWithPoint(point, 1, &mut id, &mut count) == 0 && count == 1 { id } else { CGMainDisplayID() }
+    }
+}
+
+/// Screen Recording permission: asks once (the system prompt), then System Settings decides.
+pub fn ensure_permission() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() }
+}
+
+struct Ivars {
+    finished: Mutex<Option<mpsc::Sender<Result<(), String>>>>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and Watcher has no Drop.
+    #[unsafe(super(NSObject))]
+    #[name = "ClipRecordingWatcher"]
+    #[ivars = Ivars]
+    struct Watcher;
+
+    unsafe impl NSObjectProtocol for Watcher {}
+
+    unsafe impl SCRecordingOutputDelegate for Watcher {
+        #[unsafe(method(recordingOutputDidFinishRecording:))]
+        fn did_finish(&self, _output: &SCRecordingOutput) {
+            self.send(Ok(()));
+        }
+        #[unsafe(method(recordingOutput:didFailWithError:))]
+        fn did_fail(&self, _output: &SCRecordingOutput, error: &NSError) {
+            self.send(Err(error.localizedDescription().to_string()));
+        }
+    }
+);
+
+impl Watcher {
+    fn new(tx: mpsc::Sender<Result<(), String>>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { finished: Mutex::new(Some(tx)) });
+        unsafe { objc2::msg_send![super(this), init] }
+    }
+    fn send(&self, result: Result<(), String>) {
+        if let Some(tx) = self.ivars().finished.lock().unwrap().take() { let _ = tx.send(result); }
+    }
+}
+
+/// A recording in progress. `stop` finishes the file.
+pub struct Recording {
+    stream: Retained<SCStream>,
+    _output: Retained<SCRecordingOutput>,
+    _watcher: Retained<Watcher>,
+    finished: mpsc::Receiver<Result<(), String>>,
+    pub path: PathBuf,
+}
+
+// SAFETY: SCStream is stopped from one thread at a time; ScreenCaptureKit calls the watcher on its own queue.
+unsafe impl Send for Recording {}
+
+fn wait_for(rx: &mpsc::Receiver<Option<String>>, what: &str) -> Result<(), String> {
+    match rx.recv_timeout(TIMEOUT) {
+        Ok(None) => Ok(()),
+        Ok(Some(e)) => Err(format!("{what}: {e}")),
+        Err(_) => Err(format!("{what}: ScreenCaptureKit didn't answer")),
+    }
+}
+
+fn completion(tx: mpsc::Sender<Option<String>>) -> RcBlock<dyn Fn(*mut NSError)> {
+    RcBlock::new(move |error: *mut NSError| {
+        let _ = tx.send(unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string()));
+    })
+}
+
+fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
+    struct Content(Retained<SCShareableContent>);
+    unsafe impl Send for Content {}
+    let (tx, rx) = mpsc::channel();
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        let result = match unsafe { content.as_ref() } {
+            Some(c) => Ok(Content(c.retain())),
+            None => Err(unsafe { error.as_ref() }.map_or("no content".into(), |e| e.localizedDescription().to_string())),
+        };
+        let _ = tx.send(result);
+    });
+    unsafe { SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, false, &handler) };
+    rx.recv_timeout(TIMEOUT).map_err(|_| "ScreenCaptureKit didn't answer".to_string())?.map(|c| c.0)
+}
+
+/// Start recording the display under the pointer, at its full backing resolution, into `dir`.
+pub fn start(dir: &Path) -> Result<Recording, String> {
+    let content = shareable_content().map_err(|e| format!("Screen Recording permission is needed ({e})"))?;
+    let id = pointer_display();
+    let displays = unsafe { content.displays() };
+    let display = displays.iter().find(|d| unsafe { d.displayID() } == id).or_else(|| displays.firstObject()).ok_or("no display")?;
+    let pid = std::process::id() as i32;
+    // All windows, not just on-screen ones: Clip has none showing yet, and an app with no
+    // listed window isn't in `applications`, so it couldn't be excluded.
+    let own: Vec<_> = unsafe { content.applications() }.iter().filter(|a| unsafe { a.processID() } == pid).collect();
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+            SCContentFilter::alloc(), &display, &NSArray::from_retained_slice(&own), &NSArray::new())
+    };
+    let (rect, scale) = unsafe { (filter.contentRect(), filter.pointPixelScale() as f64) };
+    let even = |v: f64| ((v * scale).round() as usize).max(2) & !1;
+    let config = unsafe { SCStreamConfiguration::new() };
+    unsafe {
+        config.setWidth(even(rect.size.width));
+        config.setHeight(even(rect.size.height));
+        config.setMinimumFrameInterval(CMTime::new(1, FPS));
+        config.setShowsCursor(true);
+        config.setQueueDepth(8);
+    }
+
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let path = dir.join(format!("raw-{stamp}.mov"));
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().ok_or("path")?));
+    let rec_config = unsafe { SCRecordingOutputConfiguration::new() };
+    unsafe {
+        rec_config.setOutputURL(&url);
+        // HEVC keeps text crisp at Apple's default bitrate; the export re-encodes anyway.
+        rec_config.setVideoCodecType(&NSString::from_str("hvc1"));
+        rec_config.setOutputFileType(&NSString::from_str("com.apple.quicktime-movie"));
+    }
+    let (fin_tx, finished) = mpsc::channel();
+    let watcher = Watcher::new(fin_tx);
+    let output = unsafe {
+        SCRecordingOutput::initWithConfiguration_delegate(SCRecordingOutput::alloc(), &rec_config, ProtocolObject::from_ref(&*watcher))
+    };
+    let stream = unsafe { SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), &filter, &config, None) };
+    unsafe { stream.addRecordingOutput_error(&output) }.map_err(|e| format!("recording output: {}", e.localizedDescription()))?;
+    let (tx, rx) = mpsc::channel();
+    unsafe { stream.startCaptureWithCompletionHandler(Some(&completion(tx))) };
+    wait_for(&rx, "start capture")?;
+    Ok(Recording { stream, _output: output, _watcher: watcher, finished, path })
+}
+
+impl Recording {
+    /// Stop and wait for the movie to be written. Returns its path.
+    pub fn stop(self) -> Result<PathBuf, String> {
+        let (tx, rx) = mpsc::channel();
+        unsafe { self.stream.stopCaptureWithCompletionHandler(Some(&completion(tx))) };
+        wait_for(&rx, "stop capture")?;
+        match self.finished.recv_timeout(TIMEOUT) {
+            Ok(Ok(())) => Ok(self.path),
+            Ok(Err(e)) => Err(format!("recording failed: {e}")),
+            Err(_) => Err("the recording didn't finish writing".into()),
+        }
+    }
+}
