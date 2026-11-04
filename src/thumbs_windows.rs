@@ -17,12 +17,19 @@ const LOOSE: f64 = 2.5;
 
 /// `count` frames spread over the movie, each fitting `max_px` (width, height).
 pub fn frames(path: &Path, times: &[f64], max_px: (f64, f64)) -> Vec<Option<Frame>> {
-    decode(path, times, max_px, false)
+    off_thread(|| decode(path, times, max_px, false))
 }
 
 /// The frame at exactly `t`, full size (for checking the renderer against the export).
 pub fn frame_at(path: &Path, t: f64) -> Option<Frame> {
-    decode(path, &[t], (16384.0, 16384.0), true).pop().flatten()
+    off_thread(|| decode(path, &[t], (16384.0, 16384.0), true).pop().flatten())
+}
+
+/// Runs Media Foundation work on a thread of its own: it starts COM multithreaded on the
+/// thread it runs on, and the UI thread must stay free for the single-threaded COM (OLE drag
+/// and drop) winit sets up when it opens a window, or opening one panics.
+fn off_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| s.spawn(f).join().expect("thumbs thread"))
 }
 
 fn decode(path: &Path, times: &[f64], max_px: (f64, f64), exact: bool) -> Vec<Option<Frame>> {
@@ -69,5 +76,5 @@ fn scaled(bgra: &[u8], w: u32, h: u32, tw: u32, th: u32) -> Frame {
 
 /// The movie's length in seconds.
 pub fn duration(path: &Path) -> Option<f64> {
-    crate::pipeline::duration(path).ok()
+    off_thread(|| crate::pipeline::duration(path).ok())
 }
