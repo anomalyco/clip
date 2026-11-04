@@ -285,7 +285,6 @@ impl Renderer {
 /// `clip --render-frame <recording.mov> <seconds> <out.png> [background]`: renders one frame of
 /// a recording the way the review would export it (its clicks zoomed, Desktop shot, whole
 /// trim, original size), for checking the renderer against the export. Exits.
-#[cfg(not(windows))]
 pub fn frame_cli(args: &[String]) -> ! {
     let run = || -> Result<(), String> {
         let [raw, t, out, rest @ ..] = args else { return Err("usage: --render-frame <recording.mov> <seconds> <out.png> [None|Dusk|Ocean|Mint|Graphite]".into()) };

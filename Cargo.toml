@@ -41,17 +41,17 @@ x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "xinput"] }
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
 
 # Windows: the screen through Windows.Graphics.Capture and the recording's encoder
-# (src/capture_windows.rs), Media Foundation for the export's decoder (src/pipeline_windows.rs),
-# the keyboard hook (src/hotkey_windows.rs) and the pointer (src/track_windows.rs); arboard
-# (Rune's own clipboard) puts the exported file on the clipboard.
+# (src/capture_windows.rs), Media Foundation for the decoder (src/pipeline_windows.rs), the
+# keyboard hook (src/hotkey_windows.rs), the pointer (src/track_windows.rs), the system sounds
+# (src/sound.rs), and the gif crate for GIF exports (src/gif_windows.rs).
 [target.'cfg(windows)'.dependencies]
 windows-capture = "2.0.1"
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
-    "Win32_System_WinRT", "Win32_System_SystemInformation", "Win32_Media_MediaFoundation",
+    "Win32_System_WinRT", "Win32_System_SystemInformation", "Win32_Media_MediaFoundation", "Win32_Media_Audio",
 ] }
-arboard = { version = "3.6", default-features = false }
+gif = "0.14"
 
 [build-dependencies]
 cc = "1"

@@ -25,7 +25,7 @@ pub fn display_bounds(id: u32) -> [f64; 4] {
     [r.x, r.y, r.w, r.h]
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn display_bounds(id: u32) -> [f64; 4] {
     crate::capture::display_bounds(id)
 }

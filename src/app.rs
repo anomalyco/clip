@@ -1,8 +1,7 @@
-// The app on macOS and Linux, included into the crate root by main.rs (so its items keep the
+// The app on every platform, included into the crate root by main.rs (so its items keep the
 // root's privacy): the hotkey, the recorder worker, the HUD, the home and review windows and
 // the menu bar or tray, over each platform's modules (capture, pipeline, thumbs, gif, menubar,
-// permissions: one file each, the same names and signatures). Windows runs its own app for now
-// (src/app_windows.rs).
+// permissions: one file each, the same names and signatures).
 
 use review::Review;
 use rune::tok::type_;
@@ -130,11 +129,11 @@ impl Clip {
     }
 
     /// The double tap: the picker, or straight to recording the screen under the pointer. On
-    /// Linux there's no picker yet (Wayland's portal has its own; X11 lists no windows), so
-    /// it's always the screen.
+    /// Linux and Windows there's no picker yet (Wayland's portal has its own; X11 and Windows
+    /// list no windows), so it's always the screen.
     fn begin(&mut self, tx: &mut Tx) {
         let display = capture::pointer_display();
-        if !self.settings.pick_area || cfg!(target_os = "linux") {
+        if !self.settings.pick_area || cfg!(not(target_os = "macos")) {
             self.start(Target::Display(display), tx);
             return;
         }
@@ -226,8 +225,9 @@ impl Clip {
     }
 
     pub fn set_setup(&mut self, setup: Setup, tx: &mut Tx) {
-        // Linux asks for nothing up front: the portal asks on the first take, if at all.
-        let setup = if cfg!(target_os = "linux") && setup == Setup::Permissions { Setup::TryIt } else { setup };
+        // Linux and Windows ask for nothing up front: the portal asks on the first take, if
+        // at all, and Windows never does.
+        let setup = if cfg!(not(target_os = "macos")) && setup == Setup::Permissions { Setup::TryIt } else { setup };
         self.settings.setup = setup;
         self.settings.onboarded |= setup == Setup::Done;
         self.settings.save();
@@ -518,8 +518,8 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     }
 }
 
-/// `clip --export <recording> [dir]`: exports a recording with the saved settings, as Linux
-/// does after every take, into `dir` (the clips folder by default), with no window. Exits.
+/// `clip --export <recording> [dir]`: exports a recording with the saved settings into `dir`
+/// (the clips folder by default), with no window. Exits.
 fn export_cli(args: &[String]) -> ! {
     let run = || -> Result<PathBuf, String> {
         let [raw, rest @ ..] = args else { return Err("usage: --export <recording> [dir]".into()) };
@@ -569,8 +569,11 @@ fn app_main() {
             s.review = None;
             if matches!(s.phase, Phase::Review | Phase::Copied(_)) { s.phase = Phase::Idle }
         });
+    // macOS leaves Clip's windows out of the capture itself (src/capture.rs); Windows is asked
+    // to leave the pill out.
     let hud = app.overlay(
-        OverlaySpec { name: "clip-hud", size: (330.0, 44.0), edge: ScreenEdge::Top, margin: 44.0, align: Align::Center, inset: 0.0, interactive: true, view: hud_view },
+        OverlaySpec { name: "clip-hud", size: (330.0, 44.0), edge: ScreenEdge::Top, margin: 44.0, align: Align::Center, inset: 0.0, interactive: true, view: hud_view }
+            .options(OverlayOptions { exclude_from_capture: cfg!(windows), ..Default::default() }),
         Hud { since: None, key_name: trigger.name, app: Some(app.handle()) },
     );
     let picker = app.overlay(

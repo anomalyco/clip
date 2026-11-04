@@ -1,11 +1,10 @@
 //! What the person did while recording, on Windows: the left button and the pointer are
 //! polled (`GetAsyncKeyState`, `GetCursorPos`) and any key, click, move or scroll counts as
 //! activity through the time of the last input (`GetLastInputInfo`); none needs a
-//! permission. Writes the same track as macOS (src/track.rs), minus the window log, so the
-//! export zooms to the clicks and skips the idle stretches the same way.
+//! permission. There's no window list yet, so a take's windows aren't logged (no Follow
+//! focus).
 
-use crate::track::{IDLE_GAP, Track};
-use std::path::Path;
+use super::{IDLE_GAP, Track, Tracker};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,13 +12,8 @@ use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-/// Watches until `stop` is set, then returns what it saw.
-pub struct Tracker {
-    stop: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<Track>,
-}
-
-fn pointer() -> (f64, f64) {
+/// The pointer in global pixels (the space the displays' bounds are in).
+pub fn pointer() -> (f64, f64) {
     let mut p = POINT::default();
     if unsafe { GetCursorPos(&mut p) }.is_err() { return (0.0, 0.0) }
     (p.x as f64, p.y as f64)
@@ -33,8 +27,9 @@ fn last_input() -> u32 {
 }
 
 impl Tracker {
-    /// Watches clicks and activity over `frame` (global pixels) from `t0`.
-    pub fn start(frame: [f64; 4], t0: Instant) -> Tracker {
+    /// `windows`: also log the windows over `frame` (for a whole-screen recording); on
+    /// Windows there's no window list yet, so it's ignored.
+    pub fn start(frame: [f64; 4], t0: Instant, _windows: bool) -> Tracker {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let handle = std::thread::Builder::new().name("clip-track".into()).spawn(move || {
@@ -64,13 +59,5 @@ impl Tracker {
             track
         }).expect("track thread");
         Tracker { stop, handle }
-    }
-
-    /// Stops tracking and saves the track beside `raw`.
-    pub fn finish(self, raw: &Path) -> Track {
-        self.stop.store(true, Ordering::Relaxed);
-        let track = self.handle.join().unwrap_or_default();
-        if let Ok(json) = serde_json::to_vec(&track) { let _ = std::fs::write(Track::path_for(raw), json); }
-        track
     }
 }

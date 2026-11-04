@@ -5,7 +5,7 @@
 //! Windows needs to call it; its callback must return quickly (Windows drops a slow hook),
 //! so `send` only hands the event on.
 
-use crate::hotkey::{COMMAND, CONTROL, Event, OPTION, SHIFT, Taps, Trigger};
+use super::{COMMAND, CONTROL, Event, OPTION, SHIFT, Taps, Trigger};
 use std::cell::RefCell;
 use std::time::Instant;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};

@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::watch;
+#[cfg(windows)]
+#[path = "hotkey_windows.rs"]
+mod win;
+#[cfg(windows)]
+pub use win::watch;
 
 #[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1; // kCGEventSourceStateHIDSystemState
@@ -26,7 +31,7 @@ unsafe extern "C" {
 }
 
 /// Which key: a device bit (one side) or either side's, and its generic modifier flag. The
-/// bits are CGEventFlags'; src/hotkey_windows.rs lays its keyboard state out the same way.
+/// bits are CGEventFlags'; the Linux and Windows watchers lay their keyboard state out the same way.
 #[derive(Clone, Copy, Debug)]
 pub struct Trigger {
     pub name: &'static str,

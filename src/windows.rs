@@ -17,7 +17,6 @@ unsafe extern "C" {
 }
 
 /// A normal window, front to back, in global points (top-left origin).
-#[cfg(not(windows))]
 #[derive(Clone, Debug)]
 pub struct Info {
     pub id: u32,
@@ -58,13 +57,14 @@ pub fn on_screen(min: f64) -> Vec<Info> {
     }
 }
 
-/// No window list on Linux yet: Wayland has none to give, and X11's isn't read.
-#[cfg(target_os = "linux")]
+/// No window list on Linux or Windows yet: Wayland has none to give, and X11's and
+/// Windows's aren't read.
+#[cfg(not(target_os = "macos"))]
 pub fn on_screen(_min: f64) -> Vec<Info> {
     Vec::new()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn app_path(_pid: i32) -> Option<std::path::PathBuf> {
     None
 }
@@ -110,15 +110,12 @@ pub struct Windows {
 }
 
 /// Smallest window worth following, in points.
-#[cfg(not(windows))]
 const MIN_SIDE: f64 = 120.0;
 /// A rect change smaller than this (a fraction of the area) isn't logged.
-#[cfg(not(windows))]
 const JITTER: f64 = 0.002;
 
 impl Windows {
-    /// Logs the windows over `frame` (global points) at `t`. Windows doesn't log windows yet.
-    #[cfg(not(windows))]
+    /// Logs the windows over `frame` (global points) at `t`.
     pub fn sample(&mut self, frame: [f64; 4], t: f64) {
         let [fx, fy, fw, fh] = frame;
         let mut front = None;

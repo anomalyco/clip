@@ -12,12 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
 use crate::pipeline::Frames;
-#[cfg(target_os = "linux")]
-use crate::pipeline::Frames;
-#[cfg(windows)]
-use crate::pipeline_windows::Frames;
 
 /// The preview's long side at most, in pixels: sharp in the review window, zoomed in too,
 /// without moving a whole 5K frame for each one shown.
@@ -75,10 +70,7 @@ pub struct Playback {
 
 /// The movie's length in seconds.
 fn duration(path: &Path) -> Option<f64> {
-    #[cfg(not(windows))]
-    { crate::thumbs::duration(path) }
-    #[cfg(windows)]
-    { crate::pipeline_windows::probe(path).ok().map(|p| p.2) }
+    crate::thumbs::duration(path)
 }
 
 impl Playback {

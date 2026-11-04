@@ -45,9 +45,7 @@ pub struct Plan {
 }
 
 pub const IDLE_SPEED: f64 = 4.0;
-#[cfg(not(windows))]
 const GIF_FPS: i32 = 15;
-#[cfg(not(windows))]
 const GIF_BOX: (u32, u32) = (800, 800);
 
 /// `w` × `h` scaled down (never up) to fit `bounds`, even on both sides.
@@ -179,8 +177,7 @@ pub fn frame_radius(canvas: &Canvas, corner: f64, video: (u32, u32), shown: [f64
 
 /// The plan the settings make of a whole recording with no review: the full take, the
 /// Desktop shot of all of it, zoomed where it was clicked and its idle stretches sped up when
-/// the settings say so. Linux exports every take this way; `--export` does on every platform.
-#[cfg_attr(windows, allow(dead_code))]
+/// the settings say so, as `--export` does on every platform.
 pub fn plan_default(track: &Track, settings: &Settings, video: (u32, u32), duration: f64, gif: bool) -> Plan {
     let px = (video.0 as f64, video.1 as f64);
     let (views, size) = crate::view::plan(crate::view::Source::Desktop, &track.windows, [0.0, 0.0, 1.0, 1.0], px, 0.0, duration);
@@ -221,21 +218,10 @@ pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Re
     let name = format!("Clip {}", stamp());
     if plan.gif {
         let gif = dir.join(format!("{name}.gif"));
-        #[cfg(not(windows))]
-        {
-            crate::pipeline::gif(source, plan, &gif, GIF_FPS as f64, GIF_BOX, &progress)?;
-            return Ok(gif);
-        }
-        #[cfg(windows)]
-        {
-            let _ = gif;
-            return Err("GIF export isn't on Windows yet".into());
-        }
+        crate::pipeline::gif(source, plan, &gif, GIF_FPS as f64, GIF_BOX, &progress)?;
+        return Ok(gif);
     }
     let movie = dir.join(format!("{name}.mp4"));
-    #[cfg(not(windows))]
     crate::pipeline::export(source, plan, &movie, &progress)?;
-    #[cfg(windows)]
-    crate::pipeline_windows::export(source, plan, &movie, &progress)?;
     Ok(movie)
 }

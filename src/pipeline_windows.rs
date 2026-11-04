@@ -1,21 +1,23 @@
-//! The export on the GPU renderer (src/render.rs), the Windows side of src/pipeline.rs: a
-//! Media Foundation source reader decodes the recording as BGRA (the H.264 decoder, with
-//! the GPU's help when it offers it), each output frame is the source frame at its time
-//! (through the trim, speed and sped-up idle stretches) drawn by the renderer, and the
-//! windows-capture transcoder encodes it (H.264 through the GPU's encoder, as the recording
-//! was). No sound yet: Windows recordings have none.
+//! The export on the GPU renderer (src/render.rs) on Windows, what AVFoundation does on macOS
+//! (src/pipeline.rs): a Media Foundation source reader decodes the recording as BGRA (the
+//! H.264 decoder, with the GPU's help when it offers it), each output frame is the source
+//! frame at its time (through the trim, speed and sped-up idle stretches) drawn by the
+//! renderer, and the windows-capture transcoder encodes it (H.264 through the GPU's encoder,
+//! as the recording was). The reader also serves the review's playback and the filmstrip
+//! (src/thumbs_windows.rs). No sound yet: Windows recordings have none.
 
 use crate::export::{self, Plan};
 use crate::render::{Image, Pixels, Renderer, Scene};
 use std::path::Path;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFAttributes, IMFMediaType, IMFSample, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_PD_DURATION, MFVideoArea, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
-    MFSTARTUP_FULL, MFStartup, MFVideoFormat_RGB32,
+    IMF2DBuffer, IMFAttributes, IMFMediaType, IMFSample, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFVideoArea, MFVideoFormat_RGB32,
 };
-use windows::core::{HSTRING, Interface};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+use windows::core::{GUID, HSTRING, Interface};
 use windows_capture::encoder::{AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder, VideoSettingsSubType};
 
 /// Media Foundation's clock: 100 ns ticks.
@@ -31,34 +33,21 @@ fn err(what: &str, e: windows::core::Error) -> String {
 }
 
 /// Media Foundation, started once for the process (shutting it down while the capture's
-/// transcoder runs would pull the rug from under it).
+/// transcoder runs would pull the rug from under it), and COM joined on the calling thread:
+/// the export, the playback and the filmstrip each read on a thread of their own.
 fn startup() -> Result<(), String> {
     use std::sync::OnceLock;
     static STARTED: OnceLock<Result<(), String>> = OnceLock::new();
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.map_err(|e| err("Media Foundation didn't start", e))).clone()
 }
 
 /// A decoded frame: its time, and its pixels as BGRA rows top to bottom.
-struct Decoded {
-    time: f64,
-    w: u32,
-    h: u32,
-    bgra: Vec<u8>,
-}
-
-/// The recording's frames, decoded as BGRA in order, stepped forward to each output frame's
-/// source time.
-pub struct Decoder {
-    reader: IMFSourceReader,
-    /// The picture's size; the decoded frames may be taller (`picture_size`).
-    w: u32,
-    h: u32,
-    /// The decoded frames' rows, and the media type's default stride: negative means the rows
-    /// come bottom-up.
-    rows: u32,
-    stride: i32,
-    current: Decoded,
-    following: Option<Decoded>,
+pub struct Decoded {
+    pub time: f64,
+    pub w: u32,
+    pub h: u32,
+    pub bgra: Vec<u8>,
 }
 
 /// The picture's size from a media type: the display aperture when the codec pads the coded
@@ -76,24 +65,31 @@ unsafe fn picture_size(ty: &IMFMediaType) -> Result<(u32, u32), String> {
     }
 }
 
-/// The recording at `path`: its picture's width and height and the seconds it plays for,
-/// from its container.
-pub fn probe(path: &Path) -> Result<(u32, u32, f64), String> {
+/// The seconds the recording at `path` plays for, from its container.
+pub fn duration(path: &Path) -> Result<f64, String> {
     startup()?;
     unsafe {
         let reader = MFCreateSourceReaderFromURL(&HSTRING::from(path.as_os_str()), None).map_err(|e| err("couldn't open the recording", e))?;
-        let video = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
-        let native = reader.GetNativeMediaType(video, 0).map_err(|e| err("the recording has no video", e))?;
-        let (w, h) = picture_size(&native)?;
         let v = reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION).map_err(|e| err("no duration", e))?;
-        let duration = u64::try_from(&v).map_err(|e| err("no duration", e))? as f64 / TICKS;
-        Ok((w, h, duration))
+        Ok(u64::try_from(&v).map_err(|e| err("no duration", e))? as f64 / TICKS)
     }
 }
 
-impl Decoder {
-    /// Opens the recording's picture, skips to the trim's start and uploads the first frame.
-    pub fn open(source: &Path, start: f64, renderer: &mut Renderer) -> Result<Decoder, String> {
+/// A recording's frames, decoded as BGRA in order from wherever it was last sought to.
+pub struct Reader {
+    reader: IMFSourceReader,
+    /// The picture's size; the decoded frames may be taller (`picture_size`).
+    pub w: u32,
+    pub h: u32,
+    /// The decoded frames' rows, and the media type's default stride: negative means the rows
+    /// come bottom-up.
+    rows: u32,
+    stride: i32,
+}
+
+impl Reader {
+    /// Opens the recording's picture at its start.
+    pub fn open(source: &Path) -> Result<Reader, String> {
         startup()?;
         unsafe {
             let mut attributes: Option<IMFAttributes> = None;
@@ -116,22 +112,18 @@ impl Decoder {
             let (w, rows) = ((size >> 32) as u32, size as u32);
             let (w, h) = picture_size(&got).map(|(pw, ph)| (pw.min(w), ph.min(rows)))?;
             let stride = got.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|s| s as i32).unwrap_or(w as i32 * 4);
-            let mut decoder = Decoder { reader, w, h, rows, stride, current: Decoded { time: 0.0, w, h, bgra: Vec::new() }, following: None };
-            decoder.current = decoder.next()?.ok_or("the recording has no frames")?;
-            // Frames before the trim: the last one before it is the first frame shown.
-            loop {
-                match decoder.next()? {
-                    Some(f) if f.time <= start + 1e-4 => decoder.current = f,
-                    other => { decoder.following = other; break }
-                }
-            }
-            upload(renderer, &decoder.current)?;
-            Ok(decoder)
+            Ok(Reader { reader, w, h, rows, stride })
         }
     }
 
+    /// Moves to the keyframe at or before `t` seconds: the frames then come from there.
+    pub fn seek(&self, t: f64) -> Result<(), String> {
+        let at = windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from((t.max(0.0) * TICKS) as i64);
+        unsafe { self.reader.SetCurrentPosition(&GUID::zeroed(), &at) }.map_err(|e| err("couldn't seek the recording", e))
+    }
+
     /// The next decoded frame, or None at the end.
-    fn next(&mut self) -> Result<Option<Decoded>, String> {
+    pub fn next(&mut self) -> Result<Option<Decoded>, String> {
         unsafe {
             loop {
                 let (mut flags, mut time, mut sample): (u32, i64, Option<IMFSample>) = (0, 0, None);
@@ -170,6 +162,35 @@ impl Decoder {
             }
         }
     }
+}
+
+/// The recording's frames in order from the trim's start, stepped forward to each output
+/// frame's source time.
+struct Decoder {
+    reader: Reader,
+    current: Decoded,
+    following: Option<Decoded>,
+}
+
+impl Decoder {
+    /// Opens the recording's picture, seeks to the trim's start and uploads the frame showing
+    /// then.
+    fn open(source: &Path, start: f64, renderer: &mut Renderer) -> Result<Decoder, String> {
+        let mut reader = Reader::open(source)?;
+        if start > 0.0 { reader.seek(start)? }
+        let current = reader.next()?.ok_or("the recording has no frames")?;
+        let mut decoder = Decoder { reader, current, following: None };
+        // Frames before the trim (the seek lands on a keyframe): the last one before it is
+        // the first frame shown.
+        loop {
+            match decoder.reader.next()? {
+                Some(f) if f.time <= start + 1e-4 => decoder.current = f,
+                other => { decoder.following = other; break }
+            }
+        }
+        upload(renderer, &decoder.current)?;
+        Ok(decoder)
+    }
 
     /// Steps to the last frame at or before source time `t`, uploading it if it changed.
     /// True when it did.
@@ -177,7 +198,7 @@ impl Decoder {
         let mut changed = false;
         while self.following.as_ref().is_some_and(|f| f.time <= t + 1e-4) {
             self.current = self.following.take().expect("checked");
-            self.following = self.next()?;
+            self.following = self.reader.next()?;
             changed = true;
         }
         if changed { upload(renderer, &self.current)? }
@@ -241,6 +262,19 @@ pub fn export(source: &Path, plan: &Plan, out: &Path, progress: impl Fn(f32)) ->
     encoder.finish().map_err(|e| format!("writing the movie failed ({e})"))?;
     progress(1.0);
     Ok(())
+}
+
+/// Exports `plan` as a looping GIF at `out`: frames at `fps`, fitting `fit`, drawn by the
+/// renderer as the MP4's are.
+pub fn gif(source: &Path, plan: &Plan, out: &Path, fps: f64, fit: (u32, u32), progress: impl Fn(f32)) -> Result<(), String> {
+    let _ = std::fs::remove_file(out);
+    let canvas = export::canvas(plan.size.0, plan.size.1, plan.background, Some(fit), plan.corner);
+    let segs = export::segments(plan);
+    let count = ((export::length(plan) * fps).floor() as usize).max(1);
+    let mut renderer = Renderer::new(Pixels::Rgba)?;
+    let mut decoder = Decoder::open(source, plan.start, &mut renderer)?;
+    crate::gif::from_frames(out, (canvas.w, canvas.h), fps, count,
+        |i| frame_at(&mut decoder, &mut renderer, plan, &segs, &canvas, i as f64 / fps), progress)
 }
 
 /// The recording's frames from a time on, for the review's playback (src/playback.rs): opened

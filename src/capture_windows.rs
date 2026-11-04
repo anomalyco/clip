@@ -1,9 +1,9 @@
-//! Record the primary display to a movie with Windows.Graphics.Capture, through the
-//! windows-capture crate: each frame stays on the GPU and goes to its Media Foundation
-//! transcoder (the NVIDIA, Intel or AMD H.264 encoder when there is one), so no frame passes
-//! through this process's memory. The capture runs on its own thread with a message loop,
-//! as Windows wants; `stop` joins it and finishes the file. The counterpart of
-//! src/capture.rs: no audio and no window or area yet, and Windows 10 draws its yellow
+//! Record a display to a movie with Windows.Graphics.Capture, what ScreenCaptureKit does on
+//! macOS (src/capture.rs), through the windows-capture crate: each frame stays on the GPU and
+//! goes to its Media Foundation transcoder (the NVIDIA, Intel or AMD H.264 encoder when there
+//! is one), so no frame passes through this process's memory. The capture runs on its own
+//! thread with a message loop, as Windows wants; `stop` joins it and finishes the file. No
+//! audio yet, a window or an area records its display, and Windows 10 draws its yellow
 //! border around a captured screen. H.264 only: Windows has no HEVC decoder of its own (the
 //! export couldn't read it back), and the transcoder refuses H.264 past 4K at 30, so a 4K
 //! display records at 30 frames a second.
@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 use windows::Win32::Foundation::POINT;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder, VideoSettingsSubType};
 use windows_capture::frame::Frame;
@@ -22,6 +24,85 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings, SecondaryWindowSettings,
     Settings,
 };
+
+/// What goes into a recording besides the screen. None of it is recorded on Windows yet: no
+/// sound, and clicks aren't drawn.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct Options {
+    pub system_audio: bool,
+    pub microphone: bool,
+    pub show_clicks: bool,
+}
+
+/// What to record. Only displays are recorded on Windows so far: a window or a region records
+/// its display. A display is an index into the monitors as Windows lists them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    Display(u32),
+    Region { display: u32, rect: [f64; 4] },
+    Window { id: u32 },
+}
+
+/// Why a recording couldn't start.
+#[derive(Debug)]
+pub enum StartError {
+    /// Windows refused the capture (it hasn't yet: a desktop app needs no permission).
+    #[allow(dead_code)]
+    NotAllowed,
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::NotAllowed => f.write_str("Screen recording wasn't allowed"),
+            StartError::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(e: String) -> Self { StartError::Failed(e) }
+}
+
+impl From<&str> for StartError {
+    fn from(e: &str) -> Self { StartError::Failed(e.into()) }
+}
+
+/// The capture's WinRT objects are made and finished on whichever thread asks; each joins
+/// the multithreaded apartment first (a thread already in one is left as it is).
+fn winrt() {
+    let _ = unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+}
+
+/// The monitors as Windows lists them, the primary first where it says so.
+fn monitors() -> Vec<Monitor> {
+    Monitor::enumerate().unwrap_or_default()
+}
+
+fn monitor_bounds(m: HMONITOR) -> [f64; 4] {
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() { return [0.0, 0.0, 1.0, 1.0] }
+    let r = info.rcMonitor;
+    [r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64]
+}
+
+/// The display the pointer is on: an index into the monitors.
+pub fn pointer_display() -> u32 {
+    let mut p = POINT::default();
+    if unsafe { GetCursorPos(&mut p) }.is_err() { return 0 }
+    let under = unsafe { MonitorFromPoint(p, MONITOR_DEFAULTTOPRIMARY) };
+    monitors().iter().position(|m| m.as_raw_hmonitor() == under.0).unwrap_or(0) as u32
+}
+
+/// A display's frame in global pixels (the space `GetCursorPos` answers in), top-left origin.
+pub fn display_bounds(id: u32) -> [f64; 4] {
+    match monitors().get(id as usize) {
+        Some(m) => monitor_bounds(HMONITOR(m.as_raw_hmonitor())),
+        None => monitor_bounds(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }),
+    }
+}
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const FPS: u32 = 60;
@@ -94,22 +175,15 @@ pub struct Recording {
     pub path: PathBuf,
 }
 
-/// The primary display's rectangle in global pixels (the space `GetCursorPos` answers in).
-pub fn primary_bounds() -> [f64; 4] {
-    unsafe {
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        if !GetMonitorInfoW(monitor, &mut info).as_bool() { return [0.0, 0.0, 1.0, 1.0] }
-        let r = info.rcMonitor;
-        [r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64]
-    }
-}
-
-/// Start recording the primary display into `dir`. Returns once the first frame is encoded,
+/// Start recording `target`'s display into `dir`. Returns once the first frame is encoded,
 /// with the recording and the recorded area in global pixels, for mapping clicks into it.
-pub fn start(dir: &Path) -> Result<(Recording, [f64; 4]), String> {
+pub fn start(dir: &Path, target: Target, _opts: Options) -> Result<(Recording, [f64; 4]), StartError> {
+    winrt();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let monitor = Monitor::primary().map_err(|e| format!("no primary display: {e}"))?;
+    let display = match target { Target::Display(d) | Target::Region { display: d, .. } => d, Target::Window { .. } => pointer_display() };
+    let monitor = monitors().get(display as usize).copied()
+        .or_else(|| Monitor::primary().ok()).ok_or("no display to record")?;
+    let bounds = monitor_bounds(HMONITOR(monitor.as_raw_hmonitor()));
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let path = dir.join(format!("raw-{stamp}.mp4"));
     let (first, started) = mpsc::channel();
@@ -120,8 +194,8 @@ pub fn start(dir: &Path) -> Result<(Recording, [f64; 4]), String> {
     let control = Handler::start_free_threaded(settings).map_err(|e| format!("couldn't start capturing: {e}"))?;
     let recording = Recording { control: Some(control), path };
     match started.recv_timeout(TIMEOUT) {
-        Ok(Ok(_)) => Ok((recording, primary_bounds())),
-        Ok(Err(e)) => { let _ = recording.stop(); Err(e) }
+        Ok(Ok(_)) => Ok((recording, bounds)),
+        Ok(Err(e)) => { let _ = recording.stop(); Err(e.into()) }
         Err(_) => { let _ = recording.stop(); Err("the screen sent no frame".into()) }
     }
 }
@@ -129,6 +203,7 @@ pub fn start(dir: &Path) -> Result<(Recording, [f64; 4]), String> {
 impl Recording {
     /// Stop and wait for the movie to be written. Returns its path.
     pub fn stop(mut self) -> Result<PathBuf, String> {
+        winrt();
         let control = self.control.take().expect("stopped once");
         let handler = control.callback();
         control.stop().map_err(|e| format!("stop capture: {e}"))?;

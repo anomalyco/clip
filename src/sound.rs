@@ -42,6 +42,18 @@ fn play_now(cue: Cue) {
     }
 }
 
+/// Windows's own event sounds, by their alias, through the multimedia player.
+#[cfg(windows)]
+fn play_now(cue: Cue) {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+    let name = match cue {
+        Cue::Start => windows::core::w!("SystemAsterisk"),
+        Cue::Stop => windows::core::w!("SystemExclamation"),
+        Cue::Copied => windows::core::w!("SystemNotification"),
+    };
+    let _ = unsafe { PlaySoundW(name, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT) };
+}
+
 #[cfg(target_os = "macos")]
 fn play_now(cue: Cue) {
     let name = match cue {
