@@ -1,5 +1,6 @@
 //! What the person did while recording, on Linux. X11 sessions poll the pointer and keymap
-//! as macOS polls its HID counters, so clicks land with their position and auto-zoom works.
+//! as macOS polls its HID counters, so clicks land with their position and auto-zoom works;
+//! XInput's raw button presses (no grab, no focus) catch clicks too short for the poll.
 //! Wayland gives no global pointer position, so there a take's clicks aren't tracked (no
 //! auto-zoom yet); busy and idle stretches still come from evdev when `/dev/input` is readable
 //! (the `input` group), which is also what the hotkey needs there.
@@ -38,19 +39,27 @@ struct X11 {
     conn: x11rb::rust_connection::RustConnection,
     root: u32,
     last: (i16, i16, bool, [u8; 32]),
+    /// Raw button presses are delivered (XInput 2), so the poll needn't catch the button down.
+    raw: bool,
 }
 
 impl X11 {
     fn open() -> Option<X11> {
         use x11rb::connection::Connection;
+        use x11rb::protocol::xinput::{ConnectionExt, Device, EventMask, XIEventMask};
         let (conn, screen) = x11rb::connect(None).ok()?;
         let root = conn.setup().roots[screen].root;
-        Some(X11 { conn, root, last: (0, 0, false, [0; 32]) })
+        let raw = conn.xinput_xi_query_version(2, 0).ok().and_then(|c| c.reply().ok()).is_some()
+            && conn.xinput_xi_select_events(root, &[EventMask { deviceid: Device::ALL_MASTER.into(), mask: vec![XIEventMask::RAW_BUTTON_PRESS] }])
+                .ok().and_then(|c| c.check().ok()).is_some();
+        Some(X11 { conn, root, last: (0, 0, false, [0; 32]), raw })
     }
 }
 
 impl Watch for X11 {
     fn poll(&mut self) -> Seen {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::Event;
         use x11rb::protocol::xproto::{ConnectionExt, KeyButMask};
         let mut seen = Seen::default();
         let Ok(p) = self.conn.query_pointer(self.root).map_err(x11rb::errors::ReplyError::from).and_then(|c| c.reply()) else { return seen };
@@ -58,8 +67,15 @@ impl Watch for X11 {
         let down = p.mask.contains(KeyButMask::BUTTON1);
         let now = (p.root_x, p.root_y, down, keys);
         seen.active = now != self.last;
-        if down && !self.last.2 { seen.click = Some((p.root_x as f64, p.root_y as f64)) }
+        if down && !self.last.2 && !self.raw { seen.click = Some((p.root_x as f64, p.root_y as f64)) }
         self.last = now;
+        while let Ok(Some(ev)) = self.conn.poll_for_event() {
+            if let Event::XinputRawButtonPress(b) = ev && b.detail == 1 {
+                seen.active = true;
+                // The press's own position: the pointer is still there, the poll just ran.
+                seen.click = Some((p.root_x as f64, p.root_y as f64));
+            }
+        }
         seen
     }
 }
