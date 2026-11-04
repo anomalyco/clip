@@ -17,6 +17,7 @@ mod thumbs;
 mod track;
 mod transcode;
 mod ui;
+mod updater;
 mod view;
 mod windows;
 mod zoom;
@@ -602,6 +603,8 @@ fn main() {
         key_name: trigger.name, stopped_at: None, started_at: None, traced_frame: false, error: None,
     });
     opener.update(|s, _| menubar::install(s.me.clone(), s.key_name));
+    let me = opener.clone();
+    updater::start(move |status| me.update(move |_, _| menubar::set_update(&status)));
     match open {
         Some(path) => opener.update(move |s, tx| s.load(path, true, tx)),
         // The first run opens the window; after it, Clip starts silently in the menu bar and
@@ -623,4 +626,5 @@ fn main() {
         }
     }
     app.run();
+    updater::install_on_quit();
 }

@@ -1,6 +1,6 @@
 [package]
 name = "clip"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
 publish = false
 
@@ -17,6 +17,9 @@ objc2-core-media = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 objc2-av-foundation = "0.3.2"
+libc = "0.2"
+sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 [build-dependencies]
 cc = "1"

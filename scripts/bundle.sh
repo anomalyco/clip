@@ -4,9 +4,21 @@
 # notarized, and a stable identity, so macOS keeps Clip's permissions across builds),
 # else ad hoc. CLIP_NOTARIZE=1 also notarizes and staples it (notarytool profile
 # CLIP_NOTARY_PROFILE, default isocast-notary).
+#
+# The version is Cargo.toml's, or CLIP_VERSION (a dev build's 0.0.0-dev-<run>); the
+# build number follows from it. CLIP_BUILD_CHANNEL (stable, dev; default local) is
+# baked in for the updater. CLIP_RELEASE_UNSIGNED=1 signs ad hoc whatever the keychain
+# holds: the Release workflow signs in its own job (.github/release/sign-macos.sh).
 set -eu
 cd "$(dirname "$0")/.."
-cargo build --release
+version=${CLIP_VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)}
+case "$version" in
+  0.0.0-dev-[0-9]*) build=${version#0.0.0-dev-} ;;
+  *) build=$(printf '%s\n' "${version%%-*}" | awk -F. '{ print ($1 * 10000) + ($2 * 100) + $3 }') ;;
+esac
+export CLIP_VERSION="$version" CLIP_BUILD_CHANNEL="${CLIP_BUILD_CHANNEL:-local}"
+export MACOSX_DEPLOYMENT_TARGET=15.0
+cargo build --locked --release
 app=target/Clip.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -30,8 +42,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Clip</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>8</string>
-  <key>CFBundleShortVersionString</key><string>0.6.0</string>
+  <key>CFBundleVersion</key><string>$build</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -42,8 +54,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 identity="${CLIP_SIGN_IDENTITY:-Developer ID Application: Ryan Vogel (9G68SMNHEU)}"
-if security find-identity -v -p codesigning | grep -qF "$identity"; then
-  codesign --force --options runtime --timestamp --entitlements scripts/clip.entitlements --sign "$identity" "$app"
+if [ "${CLIP_RELEASE_UNSIGNED:-0}" != 1 ] && security find-identity -v -p codesigning | grep -qF "$identity"; then
+  codesign --force --options runtime --timestamp --entitlements .github/release/clip.entitlements --sign "$identity" "$app"
 else
   echo "no $identity: signing ad hoc (permissions reset with every build)" >&2
   codesign --force --sign - --identifier dev.vogel.clip "$app"

@@ -1,5 +1,5 @@
 //! Clip's menu bar item, as Hex's: a template icon (a red dot while recording) and a menu to
-//! record, stop, open Clip, show the clips folder and quit. It is how a Clip running in the
+//! record, stop, open Clip, show the clips folder, check for updates and quit. It is how a Clip running in the
 //! background is found and ended. Main thread only; built once from the first update.
 
 use crate::Clip;
@@ -48,6 +48,19 @@ define_class!(
         fn quit(&self, _sender: &AnyObject) {
             self.ivars().app.quit();
         }
+        #[unsafe(method(checkUpdates:))]
+        fn check_updates(&self, _sender: &AnyObject) {
+            crate::updater::check_now();
+        }
+        #[unsafe(method(restartUpdate:))]
+        fn restart_update(&self, _sender: &AnyObject) {
+            if crate::updater::restart_into_update() { self.ivars().app.quit() }
+        }
+        #[unsafe(method(downloadUpdate:))]
+        fn download_update(&self, _sender: &AnyObject) {
+            let url = STATUS.with(|s| s.borrow().as_ref().and_then(|s| s.download.borrow().clone()));
+            if let Some(url) = url { let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn(); }
+        }
     }
 );
 
@@ -57,6 +70,10 @@ struct Status {
     stop: Retained<AnyObject>,
     idle: Retained<AnyObject>,
     recording: Retained<AnyObject>,
+    /// What the updater says, then Restart to Update or Download, when there's one.
+    update_info: Retained<AnyObject>,
+    update_action: Retained<AnyObject>,
+    download: RefCell<Option<String>>,
     _menu: Retained<AnyObject>,
     _target: Retained<Target>,
 }
@@ -115,6 +132,13 @@ pub fn install(app: AppHandle<Clip>, key_name: &str) {
         item(&menu, "Open Clip", Some(sel!(open:)), "", &target);
         item(&menu, "Show Clips in Finder", Some(sel!(clips:)), "", &target);
         separator(&menu);
+        let update_info = item(&menu, "", None, "", &target);
+        let update_action = item(&menu, "Restart to Update", Some(sel!(restartUpdate:)), "", &target);
+        let _: () = msg_send![&update_info, setHidden: true];
+        let _: () = msg_send![&update_action, setHidden: true];
+        if crate::updater::enabled() {
+            item(&menu, "Check for Updates…", Some(sel!(checkUpdates:)), "", &target);
+        }
         item(&menu, "Quit Clip", Some(sel!(quit:)), "q", &target);
 
         let bar: Retained<AnyObject> = msg_send![class!(NSStatusBar), systemStatusBar];
@@ -127,7 +151,7 @@ pub fn install(app: AppHandle<Clip>, key_name: &str) {
             let _: () = msg_send![&button, setToolTip: &*ns("Clip")];
         }
         let _: () = msg_send![&status, setMenu: &*menu];
-        STATUS.with(|s| *s.borrow_mut() = Some(Status { item: status, record, stop, idle, recording, _menu: menu, _target: target }));
+        STATUS.with(|s| *s.borrow_mut() = Some(Status { item: status, record, stop, idle, recording, update_info, update_action, download: RefCell::new(None), _menu: menu, _target: target }));
     }
 }
 
@@ -143,6 +167,37 @@ pub fn set_recording(on: bool) {
             }
             let _: () = msg_send![&record, setHidden: on];
             let _: () = msg_send![&stop, setHidden: !on];
+        }
+    });
+}
+
+/// Shows what the updater says: a line under the clips folder (while there's something to
+/// say), and Restart to Update or Download when an update is waiting.
+pub fn set_update(status: &crate::updater::Status) {
+    use crate::updater::Status as U;
+    STATUS.with(|s| {
+        let s = s.borrow();
+        let Some(s) = s.as_ref() else { return };
+        let (info, action): (Option<String>, Option<(String, Sel)>) = match status {
+            U::Checking => (Some("Checking for updates…".into()), None),
+            U::UpToDate => (Some(format!("Clip {} is up to date", crate::updater::VERSION)), None),
+            U::Downloading(v) => (Some(format!("Downloading Clip {v}…")), None),
+            U::Ready(v) => (None, Some((format!("Restart to Update to Clip {v}"), sel!(restartUpdate:)))),
+            U::Manual { version, .. } => (Some("Move Clip to Applications to update it in place".into()), Some((format!("Download Clip {version}…"), sel!(downloadUpdate:)))),
+            U::Failed(e) => (Some(format!("Couldn't update: {e}")), None),
+        };
+        *s.download.borrow_mut() = match status { U::Manual { url, .. } => Some(url.clone()), _ => None };
+        unsafe {
+            let _: () = msg_send![&s.update_info, setHidden: info.is_none()];
+            if let Some(t) = &info {
+                let t: String = if t.chars().count() > 60 { t.chars().take(59).collect::<String>() + "…" } else { t.clone() };
+                let _: () = msg_send![&s.update_info, setTitle: &*ns(&t)];
+            }
+            let _: () = msg_send![&s.update_action, setHidden: action.is_none()];
+            if let Some((title, act)) = action {
+                let _: () = msg_send![&s.update_action, setTitle: &*ns(&title)];
+                let _: () = msg_send![&s.update_action, setAction: act];
+            }
         }
     });
 }
