@@ -214,8 +214,13 @@ pub fn audio_composition(asset: &AnyObject, plan: &Plan) -> Result<Retained<AnyO
 
 /// Exports `plan` of `source` into `dir`, calling `progress` with 0..1. Returns the new file.
 pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if !source.is_file() { return Err(format!("the recording is gone: {}", source.display())) }
+    std::fs::create_dir_all(dir).map_err(|e| format!("can't make {}: {e}", dir.display()))?;
     let name = format!("Clip {}", stamp());
+    // Say where and why before the encoder's own less helpful refusal.
+    let probe = dir.join(format!("{name}.part"));
+    std::fs::write(&probe, b"").map_err(|e| format!("can't write to {}: {e}", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
     if plan.gif {
         let gif = dir.join(format!("{name}.gif"));
         crate::pipeline::gif(source, plan, &gif, GIF_FPS as f64, GIF_BOX, &progress)?;
