@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the portal's picker may stay open before a take is given up.
 const PICKER_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long `start` waits for the first frame before letting the take run without one yet.
+const FIRST_FRAME: Duration = Duration::from_millis(1500);
 const RAW_CRF: &str = "17";
 
 /// What goes into a recording besides the screen. None of it is recorded on Linux yet: no
@@ -170,10 +172,12 @@ pub fn start(dir: &Path, target: Target, opts: Options) -> Result<(Recording, [f
         Ok(Err(e)) => { shared.stop.store(true, Ordering::Relaxed); let _ = source.join(); return Err(e) }
         Err(_) => { shared.stop.store(true, Ordering::Relaxed); return Err("the screen didn't answer".into()) }
     };
-    // The first frame, so the movie never starts black.
+    // A moment for the first frame, so the movie never starts black. Compositors send frames
+    // only when something on the screen changes, so a still screen may give none yet: the
+    // pacer then starts the movie at the first frame that does come (the pill appearing and
+    // the pointer moving are changes), rather than failing the take.
     let started = Instant::now();
-    while shared.latest.lock().unwrap().seq == 0 {
-        if started.elapsed() > TIMEOUT { shared.stop.store(true, Ordering::Relaxed); return Err("no frames arrived from the screen".into()) }
+    while shared.latest.lock().unwrap().seq == 0 && started.elapsed() < FIRST_FRAME {
         std::thread::sleep(Duration::from_millis(5));
     }
 
@@ -190,14 +194,18 @@ pub fn start(dir: &Path, target: Target, opts: Options) -> Result<(Recording, [f
     let s = shared.clone();
     let pacer = std::thread::Builder::new().name("clip-pacer".into()).spawn(move || -> Result<(), String> {
         let period = Duration::from_secs_f64(1.0 / fps as f64);
-        let t0 = Instant::now();
         let mut frame = Vec::new();
-        for i in 0u64.. {
-            if s.stop.load(Ordering::Relaxed) { break }
-            let due = t0 + period * i as u32;
+        let (mut t0, mut i) = (None, 0u32);
+        while !s.stop.load(Ordering::Relaxed) {
+            if s.latest.lock().unwrap().seq == 0 {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            let due = *t0.get_or_insert_with(Instant::now) + period * i;
             if let Some(wait) = due.checked_duration_since(Instant::now()) { std::thread::sleep(wait) }
             frame.clone_from(&s.latest.lock().unwrap().frame);
             stdin.write_all(&frame).map_err(|e| format!("ffmpeg stopped taking frames ({e})"))?;
+            i += 1;
         }
         Ok(())
     }).map_err(|e| e.to_string())?;
@@ -356,15 +364,24 @@ mod portal {
         scratch: Vec<u8>,
     }
 
+    /// One runtime for the life of the process: ashpd keeps its D-Bus connection in a global,
+    /// with its tasks on the runtime that first used it, so a runtime per take would leave the
+    /// second take waiting on a connection nothing drives.
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("clip-portal").enable_all().build().expect("tokio runtime")
+        })
+    }
+
     pub fn run(shared: Arc<Shared>, tx: Sender<Result<Opened, StartError>>) -> Result<(), String> {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-        let opened = runtime.block_on(open());
+        let opened = runtime().block_on(open());
         let (proxy, session, fd, node, position, size) = match opened {
             Ok(o) => o,
             Err(e) => { let _ = tx.send(Err(e)); return Err("the portal refused".into()) }
         };
         let result = stream(&shared, &tx, fd, node, position, size);
-        let _ = runtime.block_on(async { let _ = session.close().await; drop(proxy); });
+        runtime().block_on(async { let _ = session.close().await; drop(proxy); });
         result
     }
 

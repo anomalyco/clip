@@ -33,7 +33,7 @@ ureq = { version = "3", default-features = false, features = ["native-tls"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
 pipewire = "0.10"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "xinput"] }
 
 # The renderer's GPU (src/render.rs): the wgpu Rune draws with, on each platform's backend.
