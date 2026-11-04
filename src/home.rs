@@ -10,7 +10,7 @@ use rune::{Color, Cx, DragItem, El, Tx, col, el, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, SegmentedControl, Switch};
 
 pub const SETUP_SIZE: (f32, f32) = (640.0, 560.0);
-pub const HOME_SIZE: (f32, f32) = (720.0, 780.0);
+pub const HOME_SIZE: (f32, f32) = (720.0, 840.0);
 
 fn page(body: El, action: El, step: Option<usize>) -> El {
     let mut dots = row().key("dots").gap(6.0).h(20.0).center();
@@ -145,6 +145,8 @@ fn home(s: &Clip) -> El {
     let mic_ok = s.mic_ok;
     let sizes: Vec<&str> = Size::ALL.iter().map(|z| z.label()).collect();
     let rows = vec![
+        setting_row("pick", "Choose what to record", "After ⌃ ⌃, click a window or drag an area. Off records the whole screen.",
+            switch(st.pick_area, |s, _| { s.settings.pick_area ^= true; s.settings.save() })),
         setting_row("sys", "System audio", "Record what your Mac plays.", switch(st.system_audio, |s, _| { s.settings.system_audio ^= true; s.settings.save() })),
         setting_row("mic", "Microphone", if mic_ok { "Record your voice over it." } else { "Asks for the microphone first." },
             switch(st.microphone && mic_ok, |s, _| s.toggle_mic())),

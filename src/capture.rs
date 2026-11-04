@@ -31,13 +31,13 @@ struct CGPoint { x: f64, y: f64 }
 unsafe extern "C" {
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
-    fn CFRelease(cf: *mut std::ffi::c_void);
+    fn CFRelease(cf: *const std::ffi::c_void);
     fn CGGetDisplaysWithPoint(point: CGPoint, max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGMainDisplayID() -> u32;
 }
 
 /// The display the pointer is on.
-fn pointer_display() -> u32 {
+pub fn pointer_display() -> u32 {
     unsafe {
         let event = CGEventCreate(std::ptr::null());
         if event.is_null() { return CGMainDisplayID(); }
@@ -132,26 +132,61 @@ pub struct Options {
     pub show_clicks: bool,
 }
 
-/// Start recording the display under the pointer, at its full backing resolution, into `dir`.
-pub fn start(dir: &Path, opts: Options) -> Result<Recording, String> {
+/// What to record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    Display(u32),
+    /// An area of a display, in its local points.
+    Region { display: u32, rect: [f64; 4] },
+    /// One window, wherever it moves, even behind others.
+    Window { id: u32 },
+}
+
+/// Start recording `target` at full backing resolution into `dir`. Returns the recording and
+/// the recorded area in global points, for mapping clicks into it.
+pub fn start(dir: &Path, target: Target, opts: Options) -> Result<(Recording, [f64; 4]), String> {
     let content = shareable_content().map_err(|e| format!("Screen Recording permission is needed ({e})"))?;
-    let id = pointer_display();
     let displays = unsafe { content.displays() };
-    let display = displays.iter().find(|d| unsafe { d.displayID() } == id).or_else(|| displays.firstObject()).ok_or("no display")?;
+    let display_for = |id: u32| displays.iter().find(|d| unsafe { d.displayID() } == id).or_else(|| displays.firstObject()).ok_or("no display");
     let pid = std::process::id() as i32;
     // All windows, not just on-screen ones: Clip has none showing yet, and an app with no
     // listed window isn't in `applications`, so it couldn't be excluded.
     let own: Vec<_> = unsafe { content.applications() }.iter().filter(|a| unsafe { a.processID() } == pid).collect();
-    let filter = unsafe {
-        SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
-            SCContentFilter::alloc(), &display, &NSArray::from_retained_slice(&own), &NSArray::new())
+    let display_filter = |id: u32| -> Result<_, String> {
+        let display = display_for(id)?;
+        Ok(unsafe {
+            SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                SCContentFilter::alloc(), &display, &NSArray::from_retained_slice(&own), &NSArray::new())
+        })
+    };
+    let (filter, source, frame) = match target {
+        Target::Display(id) => (display_filter(id)?, None, crate::picker::display_bounds(id)),
+        Target::Region { display, rect } => {
+            let b = crate::picker::display_bounds(display);
+            (display_filter(display)?, Some(rect), [b[0] + rect[0], b[1] + rect[1], rect[2], rect[3]])
+        }
+        Target::Window { id } => {
+            let window = unsafe { content.windows() }.iter().find(|w| unsafe { w.windowID() } == id).ok_or("that window closed")?;
+            let f = unsafe { window.frame() };
+            let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window) };
+            (filter, None, [f.origin.x, f.origin.y, f.size.width, f.size.height])
+        }
     };
     let (rect, scale) = unsafe { (filter.contentRect(), filter.pointPixelScale() as f64) };
+    let (w, h) = source.map_or((rect.size.width, rect.size.height), |r| (r[2], r[3]));
     let even = |v: f64| ((v * scale).round() as usize).max(2) & !1;
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
-        config.setWidth(even(rect.size.width));
-        config.setHeight(even(rect.size.height));
+        config.setWidth(even(w));
+        config.setHeight(even(h));
+        if let Some([x, y, w, h]) = source {
+            config.setSourceRect(objc2_core_foundation::CGRect::new(objc2_core_foundation::CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h)));
+        }
+        if matches!(target, Target::Window { .. }) {
+            // A resized window scales into the movie's size instead of cropping.
+            config.setScalesToFit(true);
+            config.setPreservesAspectRatio(true);
+        }
         config.setMinimumFrameInterval(CMTime::new(1, FPS));
         config.setShowsCursor(true);
         config.setShowMouseClicks(opts.show_clicks);
@@ -187,7 +222,7 @@ pub fn start(dir: &Path, opts: Options) -> Result<Recording, String> {
     let (tx, rx) = mpsc::channel();
     unsafe { stream.startCaptureWithCompletionHandler(Some(&completion(tx))) };
     wait_for(&rx, "start capture")?;
-    Ok(Recording { stream, _output: output, _watcher: watcher, finished, path })
+    Ok((Recording { stream, _output: output, _watcher: watcher, finished, path }, frame))
 }
 
 impl Recording {

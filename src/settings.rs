@@ -41,6 +41,46 @@ impl Size {
     }
 }
 
+/// The backdrop behind the video in an export: none, or a gradient with the video floating
+/// on it with rounded corners and a shadow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Background {
+    #[default]
+    None,
+    Dusk,
+    Ocean,
+    Mint,
+    Graphite,
+}
+
+impl Background {
+    pub const ALL: [Background; 5] = [Background::None, Background::Dusk, Background::Ocean, Background::Mint, Background::Graphite];
+    pub fn label(self) -> &'static str {
+        match self {
+            Background::None => "None",
+            Background::Dusk => "Dusk",
+            Background::Ocean => "Ocean",
+            Background::Mint => "Mint",
+            Background::Graphite => "Graphite",
+        }
+    }
+    /// Bottom-left and top-right sRGB colours.
+    pub fn colors(self) -> (u32, u32) {
+        match self {
+            Background::None => (0x000000, 0x000000),
+            Background::Dusk => (0x5b3df5, 0xf0619a),
+            Background::Ocean => (0x0b3d91, 0x2bc0e4),
+            Background::Mint => (0x11998e, 0x9be15d),
+            Background::Graphite => (0x1b1b20, 0x4a4a55),
+        }
+    }
+    pub fn next(self) -> Self {
+        Self::ALL[(Self::ALL.iter().position(|b| *b == self).unwrap_or(0) + 1) % Self::ALL.len()]
+    }
+}
+
+pub const SPEEDS: [f64; 3] = [1.0, 1.5, 2.0];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -50,11 +90,18 @@ pub struct Settings {
     pub show_clicks: bool,
     pub sounds: bool,
     pub size: Size,
+    /// Ask what to record (window, area or screen) after the double tap.
+    pub pick_area: bool,
+    pub zoom: bool,
+    pub skip_idle: bool,
+    pub speed: f64,
+    pub background: Background,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { setup: Setup::Welcome, system_audio: false, microphone: false, show_clicks: true, sounds: true, size: Size::Original }
+        Self { setup: Setup::Welcome, system_audio: false, microphone: false, show_clicks: true, sounds: true, size: Size::Original,
+            pick_area: true, zoom: true, skip_idle: false, speed: 1.0, background: Background::None }
     }
 }
 

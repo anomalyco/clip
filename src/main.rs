@@ -4,20 +4,26 @@
 
 mod capture;
 mod export;
+mod gif;
 mod home;
 mod hotkey;
 mod permissions;
+mod picker;
 mod review;
 mod settings;
 mod sound;
 mod thumbs;
+mod track;
 mod ui;
+mod zoom;
 
 use review::Review;
 use rune::tok::type_;
+use capture::Target;
 use rune::{
-    Align, App, AppHandle, AppSpec, ClipboardContent, Color, Cx, DisplayTarget, El, Image, ImageCache, KeyEvent, OverlayHandle,
-    OverlaySpec, ScreenEdge, Tx, Waker, el, row, text,
+    Align, App, AppHandle, AppSpec, ClipboardContent, Color, Cx, DisplayTarget, El, Image, ImageCache, KeyEvent, KeyPolicy,
+    NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel, OverlayOptions, OverlayPlacement, OverlaySpec, ScreenEdge, Tx,
+    Waker, el, row, text,
 };
 use settings::{Settings, Setup};
 use std::path::PathBuf;
@@ -56,6 +62,8 @@ pub fn reveal_clips() {
 #[derive(Clone, PartialEq)]
 pub enum Phase {
     Idle,
+    /// The picker shows: a window, an area or the whole screen.
+    Picking,
     Starting,
     Recording,
     Finishing,
@@ -72,7 +80,7 @@ pub struct Recent {
 }
 
 enum Cmd {
-    Start(capture::Options),
+    Start(Target, capture::Options),
     Stop,
 }
 
@@ -81,6 +89,7 @@ pub struct Clip {
     pub settings: Settings,
     pub me: AppHandle<Clip>,
     hud: OverlayHandle<Hud>,
+    picker: OverlayHandle<picker::Picker>,
     worker: mpsc::Sender<Cmd>,
     waker: Option<Waker>,
     pub images: Option<ImageCache>,
@@ -101,6 +110,7 @@ pub struct Clip {
     /// A tap right after a start is a third tap of the double, not a stop.
     started_at: Option<Instant>,
     traced_frame: bool,
+    picking_display: u32,
     error: Option<String>,
 }
 
@@ -133,7 +143,11 @@ impl Clip {
             }
             Event::Double => {
                 let fresh = self.stopped_at.is_none_or(|t| t.elapsed() > RETAKE_GUARD);
-                if fresh && matches!(self.phase, Phase::Idle | Phase::Review | Phase::Copied(_)) { self.start(tx) }
+                match self.phase {
+                    Phase::Picking => self.picked(Some(Target::Display(self.picking_display)), tx),
+                    Phase::Idle | Phase::Review | Phase::Copied(_) if fresh => self.begin(tx),
+                    _ => {}
+                }
                 true
             }
             Event::Tap => {
@@ -144,7 +158,38 @@ impl Clip {
         }
     }
 
-    fn start(&mut self, tx: &mut Tx) {
+    /// The double tap: the picker, or straight to recording the screen under the pointer.
+    fn begin(&mut self, tx: &mut Tx) {
+        if !permissions::screen_usable() {
+            self.start(Target::Display(capture::pointer_display()), tx);
+            return;
+        }
+        let display = capture::pointer_display();
+        if !self.settings.pick_area {
+            self.start(Target::Display(display), tx);
+            return;
+        }
+        if let Some(r) = &self.review { r.player.pause() }
+        tx.close_window();
+        self.phase = Phase::Picking;
+        self.picking_display = display;
+        self.picker.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+        self.picker.update(move |p, _| p.open(display));
+        self.picker.show();
+        self.picker.request_keys();
+    }
+
+    /// The picker's answer: `None` cancels.
+    pub fn picked(&mut self, target: Option<Target>, tx: &mut Tx) {
+        if self.phase != Phase::Picking { return }
+        self.picker.hide();
+        match target {
+            Some(t) => { self.phase = Phase::Idle; self.start(t, tx) }
+            None => self.phase = Phase::Idle,
+        }
+    }
+
+    fn start(&mut self, target: Target, tx: &mut Tx) {
         if !permissions::screen_usable() {
             // Show why: the permissions step, wherever setup was.
             self.settings.setup = Setup::Permissions;
@@ -159,7 +204,7 @@ impl Clip {
         if self.settings.sounds { sound::play(sound::Cue::Start) }
         // The worker checks the microphone grant; the first AVCaptureDevice call is slow.
         let opts = capture::Options { system_audio: self.settings.system_audio, microphone: self.settings.microphone, show_clicks: self.settings.show_clicks };
-        let _ = self.worker.send(Cmd::Start(opts));
+        let _ = self.worker.send(Cmd::Start(target, opts));
     }
 
     pub fn stop(&mut self) {
@@ -273,19 +318,17 @@ impl Clip {
         tx.quit();
     }
 
-    pub fn export(&mut self) {
+    pub fn export(&mut self, gif: bool) {
         if self.phase != Phase::Review { return }
         let Some(r) = &self.review else { return };
-        let Some(crop) = r.crop_px() else { return };
-        let (start, end) = r.trim();
+        let Some(plan) = r.plan(&self.settings, gif) else { return };
         r.player.pause();
         let source = r.source.clone();
         self.phase = Phase::Exporting(0.0);
-        let (me, fit, sounds) = (self.me.clone(), self.settings.size.bounds(), self.settings.sounds);
+        let (me, sounds) = (self.me.clone(), self.settings.sounds);
         std::thread::spawn(move || {
             let progress = me.clone();
-            let cut = export::Cut { start, end, crop, fit };
-            let result = export::run(&source, cut, &clips_dir(), move |f| {
+            let result = export::run(&source, &plan, &clips_dir(), move |f| {
                 progress.update_if(move |s, _| {
                     let Phase::Exporting(old) = s.phase else { return false };
                     // Redraw only when the shown percent changes.
@@ -324,7 +367,7 @@ impl Clip {
         let me = self.me.clone();
         std::thread::spawn(move || {
             let mut files: Vec<(PathBuf, std::time::SystemTime, u64)> = std::fs::read_dir(clips_dir()).into_iter().flatten().flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
+                .filter(|e| e.path().extension().is_some_and(|x| x == "mp4" || x == "gif"))
                 .filter_map(|e| { let m = e.metadata().ok()?; Some((e.path(), m.modified().ok()?, m.len())) })
                 .collect();
             files.sort_by(|a, b| b.1.cmp(&a.1));
@@ -358,7 +401,7 @@ fn prune_raw() {
 fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     std::thread::Builder::new().name("clip-recorder".into()).spawn(move || {
-        let mut recording: Option<(capture::Recording, bool)> = None;
+        let mut recording: Option<(capture::Recording, track::Tracker, bool)> = None;
         loop {
             // While recording, wake twice a second so the pill's clock ticks; otherwise sleep.
             let wait = if recording.is_some() { Duration::from_millis(500) } else { Duration::from_secs(3600) };
@@ -371,12 +414,13 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                 Err(_) => break,
             };
             match cmd {
-                Cmd::Start(mut opts) if recording.is_none() => {
+                Cmd::Start(target, mut opts) if recording.is_none() => {
                     prune_raw();
                     opts.microphone &= permissions::microphone(false) == permissions::Access::Allowed;
-                    match capture::start(&raw_dir(), opts) {
-                        Ok(r) => {
-                            recording = Some((r, opts.system_audio || opts.microphone));
+                    match capture::start(&raw_dir(), target, opts) {
+                        Ok((r, frame)) => {
+                            let tracker = track::Tracker::start(frame, Instant::now());
+                            recording = Some((r, tracker, opts.system_audio || opts.microphone));
                             hud.set_display(DisplayTarget::UnderPointer);
                             hud.update(|h, _| h.since = Some(Instant::now()));
                             hud.show();
@@ -386,9 +430,12 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     }
                 }
                 Cmd::Stop => {
-                    let Some((r, audio)) = recording.take() else { continue };
+                    let Some((r, tracker, audio)) = recording.take() else { continue };
                     match r.stop() {
-                        Ok(path) => me.update(move |s, tx| s.load(path, audio, tx)),
+                        Ok(path) => {
+                            tracker.finish(&path);
+                            me.update(move |s, tx| s.load(path, audio, tx))
+                        }
                         Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
                     }
                 }
@@ -432,7 +479,7 @@ fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
         trace("video loaded");
     }
     // Playback moves only live values: keep polling each frame, but don't rebuild the view.
-    if s.review.as_ref().is_some_and(Review::follow) {
+    if s.review.as_ref().is_some_and(|r| r.follow(&s.settings)) {
         tx.wake_after(Duration::from_millis(16));
     }
     if s.toast.as_ref().is_some_and(|(_, at)| at.elapsed() >= TOAST) {
@@ -491,6 +538,13 @@ fn main() {
         OverlaySpec { name: "clip-hud", size: (330.0, 44.0), edge: ScreenEdge::Top, margin: 44.0, align: Align::Center, inset: 0.0, interactive: true, view: hud_view },
         Hud { since: None, key_name: trigger.name, app: Some(app.handle()) },
     );
+    let picker = app.overlay(
+        OverlaySpec::new("clip-picker", (800.0, 600.0), picker::view).options(OverlayOptions {
+            placement: Some(OverlayPlacement::FullScreen), display: DisplayTarget::UnderPointer, level: OverlayLevel::AboveStatus,
+            input: OverlayInput::All, keys: KeyPolicy::OnDemand, ..Default::default()
+        }).on_key(picker::on_key),
+        picker::Picker::new(app.handle(), trigger.name),
+    );
     let me = app.handle();
     let worker = worker(me.clone(), hud.clone());
     let keys = me.clone();
@@ -500,8 +554,10 @@ fn main() {
     std::thread::spawn(move || {
         for line in std::io::stdin().lines().map_while(Result::ok) {
             match line.trim() {
-                "toggle" => script.update(|s, tx| if s.phase == Phase::Recording { s.stop() } else { s.start(tx) }),
-                "export" => script.update(|s, _| s.export()),
+                "toggle" => script.update(|s, tx| if s.phase == Phase::Recording { s.stop() } else { s.begin(tx) }),
+                "full" => script.update(|s, tx| s.start(Target::Display(capture::pointer_display()), tx)),
+                "export" => script.update(|s, _| s.export(false)),
+                "gif" => script.update(|s, _| s.export(true)),
                 "home" => script.update(|s, tx| s.show(tx)),
                 _ => {}
             }
@@ -512,7 +568,7 @@ fn main() {
     let first_run = settings.setup != Setup::Done;
     let opener = me.clone();
     let app = app.args(Vec::new()).init(move || Clip {
-        phase: Phase::Idle, settings, me, hud, worker, waker: None, images: None, review: None,
+        phase: Phase::Idle, settings, me, hud, picker, picking_display: 0, worker, waker: None, images: None, review: None,
         asked_screen: false, asked_mic: false, key_down: false, login: None, mic_ok: false, screen_seen: permissions::Access::Off, recent: Vec::new(), toast: None,
         key_name: trigger.name, stopped_at: None, started_at: None, traced_frame: false, error: None,
     });

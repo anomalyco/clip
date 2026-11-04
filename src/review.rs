@@ -1,17 +1,21 @@
-//! The review window: the recording playing, a crop drawn by dragging across it, a trim drawn
-//! by dragging across the filmstrip, and the export.
+//! The review window. Paused, it shows the whole recording for editing: drag across it to
+//! crop, across the filmstrip to trim. Playing, it previews the export as it will look:
+//! cropped, on its background, zooming on clicks, idle stretches sped up.
 
-use crate::settings::Size;
+use crate::export::{self, Plan};
+use crate::settings::{Background, SPEEDS, Settings, Size};
+use crate::track::Track;
 use crate::ui::{BG, GREEN, clock, hex, hint, ink, kit, megabytes};
-use crate::{Clip, Phase, export};
+use crate::zoom::{self, Key};
+use crate::{Clip, Phase};
 use rune::tok::type_;
 use rune::{Color, Cx, Drag, El, Image, Live, LiveText, Phase as DragPhase, Player, SurfaceFit, Tx, col, el, row, spacer, text};
-use std::cell::Cell;
-use rune_kit::SegmentedControl;
+use rune_kit::{SegmentedControl, Switch};
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const SIZE: (f32, f32) = (1180.0, 860.0);
+pub const SIZE: (f32, f32) = (1180.0, 900.0);
 const TIMELINE_H: f32 = 56.0;
 /// Frames in the filmstrip.
 pub const FILM: usize = 14;
@@ -48,9 +52,33 @@ enum Grab {
     TrimEnd,
 }
 
+/// What follows from the crop, trim and settings, worked out once per change.
+#[derive(Clone, PartialEq)]
+struct Inputs {
+    crop: [f32; 4],
+    trim: (f64, f64),
+    zoom: bool,
+    skip_idle: bool,
+}
+
+struct Derived {
+    inputs: Inputs,
+    zoom: Vec<Key>,
+    idle: Vec<(f64, f64)>,
+}
+
+/// Where the preview's video sits: its box in the stage, and the source pixels it shows.
+#[derive(Clone, Copy)]
+struct Preview {
+    inner: [f32; 4],
+    crop: [f32; 4],
+    natural: (f32, f32),
+}
+
 pub struct Review {
     pub player: Player,
     pub source: PathBuf,
+    pub track: Track,
     /// Seconds.
     pub trim: (f64, f64),
     /// Normalized x, y, w, h.
@@ -59,12 +87,16 @@ pub struct Review {
     pub aspect: Aspect,
     pub film: Vec<Image>,
     pub muted: bool,
-    /// The playhead and clock move through live values while it plays, so playback redraws
-    /// two elements instead of rebuilding the view every frame.
+    /// The playhead, clock and zoomed video move through live values while it plays, so
+    /// playback redraws them instead of rebuilding the view every frame.
     playhead: Live<[f32; 2]>,
     clock: LiveText,
+    video_rect: Live<[f32; 4]>,
     /// The timeline's width from the last layout, to place the playhead between rebuilds.
     track_w: Cell<f32>,
+    preview: Cell<Option<Preview>>,
+    rate: Cell<f32>,
+    derived: RefCell<Option<Derived>>,
 }
 
 impl Review {
@@ -75,9 +107,11 @@ impl Review {
         player.set_looping(true);
         player.preload();
         player.play();
+        let track = Track::load(&path);
         Self {
-            player, source: path, trim: (0.0, f64::MAX), crop: FULL, grab: Grab::None, aspect: Aspect::Free, film: Vec::new(), muted: !has_audio,
-            playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), track_w: Cell::new(SIZE.0 - 40.0),
+            player, source: path, track, trim: (0.0, f64::MAX), crop: FULL, grab: Grab::None, aspect: Aspect::Free, film: Vec::new(), muted: !has_audio,
+            playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), video_rect: Live::new([0.0; 4]),
+            track_w: Cell::new(SIZE.0 - 40.0), preview: Cell::new(None), rate: Cell::new(1.0), derived: RefCell::new(None),
         }
     }
 
@@ -101,10 +135,33 @@ impl Review {
         Some([px(x, w), px(y, h), px(cw, w).max(2), px(ch, h).max(2)])
     }
 
-    /// The size the export comes out at, after `size` scales the crop down.
-    pub fn out_px(&self, size: Size) -> Option<(u32, u32)> {
-        let [_, _, w, h] = self.crop_px()?;
-        Some(export::fitted(w, h, size.bounds()))
+    /// The zoom plan and idle stretches for the current crop, trim and settings.
+    fn derived<T>(&self, s: &Settings, f: impl FnOnce(&[Key], &[(f64, f64)]) -> T) -> T {
+        let inputs = Inputs { crop: self.crop, trim: self.trim(), zoom: s.zoom, skip_idle: s.skip_idle };
+        let mut cache = self.derived.borrow_mut();
+        if cache.as_ref().is_none_or(|d| d.inputs != inputs) {
+            let (a, b) = inputs.trim;
+            let crop = self.crop.map(|v| v as f64);
+            let zoom = if s.zoom { zoom::plan(&self.track.clicks, crop, a, b) } else { Vec::new() };
+            let idle = if s.skip_idle { self.track.idle(a, b) } else { Vec::new() };
+            *cache = Some(Derived { inputs, zoom, idle });
+        }
+        let d = cache.as_ref().expect("filled above");
+        f(&d.zoom, &d.idle)
+    }
+
+    pub fn plan(&self, s: &Settings, gif: bool) -> Option<Plan> {
+        let crop = self.crop_px()?;
+        let (start, end) = self.trim();
+        let (zoom, idle) = self.derived(s, |z, i| (z.to_vec(), i.to_vec()));
+        Some(Plan { start, end, crop, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, gif })
+    }
+
+    /// The export's size, and its length in seconds.
+    fn out(&self, s: &Settings) -> Option<((u32, u32), f64)> {
+        let plan = self.plan(s, false)?;
+        let c = export::canvas(plan.crop[2], plan.crop[3], s.background, s.size.bounds());
+        Some(((c.w, c.h), export::length(&plan)))
     }
 
     fn seek(&self, t: f64) {
@@ -130,24 +187,46 @@ impl Review {
         self.crop = [(1.0 - w / vw) / 2.0, (1.0 - h / vh) / 2.0, w / vw, h / vh];
     }
 
-    /// Keeps the playhead inside the trim and publishes it. True while it plays.
-    pub fn follow(&self) -> bool {
+    /// Keeps the playhead inside the trim, plays idle stretches fast, and publishes the live
+    /// values. True while it plays.
+    pub fn follow(&self, s: &Settings) -> bool {
         let p = &self.player;
         let playing = p.is_playing();
         if playing {
             let (a, b) = self.trim();
             if b > a && (p.time() >= b || p.time() < a - 0.05) { p.seek(a) }
+            let t = p.time();
+            let idle = self.derived(s, |_, idle| idle.iter().any(|&(x, y)| t >= x && t < y));
+            let rate = (s.speed * if idle { export::IDLE_SPEED } else { 1.0 }) as f32;
+            if rate != self.rate.get() {
+                self.rate.set(rate);
+                p.set_rate(rate);
+            }
         }
-        self.publish();
+        self.publish(s);
         playing
     }
 
-    fn publish(&self) {
+    fn publish(&self, s: &Settings) {
         let (now, dur) = (self.player.time(), self.duration());
         let x = if dur > 0.0 { (now / dur) as f32 * self.track_w.get() } else { 0.0 };
         self.playhead.set([(x - 1.0).max(0.0), 0.0]);
         self.clock.set(format!("{} / {}", clock(now), clock(dur)));
+        if let Some(p) = self.preview.get() {
+            let (z, cx, cy) = self.derived(s, |keys, _| zoom::sample(keys, now));
+            self.video_rect.set(video_rect(&p, z, cx, cy));
+        }
     }
+}
+
+/// The video element's rect inside the preview box, showing the zoomed part of the crop.
+fn video_rect(p: &Preview, z: f64, cx: f64, cy: f64) -> [f32; 4] {
+    let [vx, vy, vw, _] = zoom::viewport(z, cx, cy).map(|v| v as f32);
+    let (nw, nh) = p.natural;
+    let [x, y, w, h] = p.crop;
+    let (left, top) = ((x + vx * w) * nw, (y + vy * h) * nh);
+    let k = p.inner[2] / (w * nw * vw);
+    [-left * k, -top * k, nw * k, nh * k]
 }
 
 /// Where the video sits inside a stage of `stage` points, fitted and centred.
@@ -161,6 +240,12 @@ fn fit(stage: [f32; 2], video: (u32, u32)) -> [f32; 4] {
 fn crop_drag(s: &mut Clip, d: &mut Drag, tx: &mut Tx) {
     tx.instant();
     let Some(r) = s.review.as_mut() else { return };
+    // Playing shows the preview, laid out differently: a press there only pauses.
+    if d.phase == DragPhase::Down && r.player.is_playing() {
+        r.player.pause();
+        r.grab = Grab::None;
+        return;
+    }
     let Some(size) = r.player.natural_size() else { return };
     let [ox, oy, w, h] = fit([d.w, d.h], size);
     let norm = |x: f32, y: f32| [((x - ox) / w).clamp(0.0, 1.0), ((y - oy) / h).clamp(0.0, 1.0)];
@@ -181,7 +266,6 @@ fn crop_drag(s: &mut Clip, d: &mut Drag, tx: &mut Tx) {
                 if let Some(ratio) = r.aspect.ratio() {
                     let (sx, sy) = (dw.signum(), dh.signum());
                     let wd = dw.abs().max(dh.abs() * ratio);
-                    // Keep it inside the frame on the side it grows toward.
                     let room_x = if sx >= 0.0 { (1.0 - a[0]) * vw } else { a[0] * vw };
                     let room_y = if sy >= 0.0 { (1.0 - a[1]) * vh } else { a[1] * vh };
                     let wd = wd.min(room_x).min(room_y * ratio);
@@ -249,14 +333,21 @@ pub fn on_key(s: &mut Clip, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     let Some(r) = s.review.as_mut() else { return false };
     let t = r.player.time();
     match &ev.key {
-        Key::Enter => s.export(),
+        Key::Enter => s.export(ev.mods.shift),
         Key::Escape => s.close_review(tx),
-        Key::Text(c) => match c.as_str() {
+        Key::Text(c) => match c.to_lowercase().as_str() {
             " " => r.toggle_play(),
             "i" => r.trim.0 = t.min(r.trim().1 - MIN_TRIM).max(0.0),
             "o" => r.trim.1 = t.max(r.trim().0 + MIN_TRIM),
             "m" => { r.muted = !r.muted; r.player.set_muted(r.muted) }
             "r" => { r.trim = (0.0, f64::MAX); r.crop = FULL; r.aspect = Aspect::Free }
+            "z" => { s.settings.zoom ^= true; s.settings.save() }
+            "b" => { s.settings.background = s.settings.background.next(); s.settings.save() }
+            "s" => {
+                let i = SPEEDS.iter().position(|v| *v == s.settings.speed).unwrap_or(0);
+                s.settings.speed = SPEEDS[(i + 1) % SPEEDS.len()];
+                s.settings.save();
+            }
             "1" | "2" | "3" | "4" => {
                 let a = Aspect::ALL[c.parse::<usize>().unwrap_or(1) - 1];
                 if a == Aspect::Free { r.aspect = a; r.crop = FULL } else { r.set_aspect(a) }
@@ -273,13 +364,8 @@ pub fn on_key(s: &mut Clip, ev: &rune::KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-fn stage(r: &Review, cx: &mut Cx<Clip>) -> El {
-    let stage = cx.layout_size("stage").unwrap_or([SIZE.0 - 40.0, SIZE.1 - 240.0]);
-    let mut root = el().key("stage").w_full().grow(1.0).on_drag(crop_drag);
-    if let rune::PlayerState::Failed(e) = r.player.state() {
-        return root.center().child(text(e).font(type_::BODY).color(ink(0.6)));
-    }
-    // Rune opens the clip once its surface is mounted, so mount it before the size is known.
+fn edit_stage(r: &Review, stage: [f32; 2], mut root: El) -> El {
+    r.preview.set(None);
     let size = r.player.natural_size().unwrap_or((16, 9));
     let [ox, oy, w, h] = fit(stage, size);
     root = root.child(el().key("video").absolute(ox, oy).w(w).h(h).radius(6.0).video(&r.player, SurfaceFit::Fill));
@@ -311,16 +397,51 @@ fn stage(r: &Review, cx: &mut Cx<Clip>) -> El {
     root
 }
 
-fn timeline(r: &Review, cx: &mut Cx<Clip>) -> El {
+/// The export as it will look: the crop on its background, the video zooming inside it.
+fn preview_stage(s: &Clip, r: &Review, stage: [f32; 2], root: El) -> El {
+    let Some([_, _, cw, ch]) = r.crop_px() else { return edit_stage(r, stage, root) };
+    let c = export::canvas(cw, ch, s.settings.background, None);
+    let k = (stage[0] / c.w as f32).min(stage[1] / c.h as f32);
+    let (w, h) = (c.w as f32 * k, c.h as f32 * k);
+    let (ox, oy) = ((stage[0] - w) / 2.0, (stage[1] - h) / 2.0);
+    let inner = [ox + c.inner[0] as f32 * k, oy + c.inner[1] as f32 * k, c.inner[2] as f32 * k, c.inner[3] as f32 * k];
+    let natural = r.video_px().unwrap_or((16.0, 9.0));
+    let p = Preview { inner, crop: r.crop, natural };
+    r.preview.set(Some(p));
+    let (z, cx, cy) = r.derived(&s.settings, |keys, _| zoom::sample(keys, r.player.time()));
+    let [vx, vy, vw, vh] = video_rect(&p, z, cx, cy);
+    let mut root = root;
+    if s.settings.background != Background::None {
+        let (a, b) = s.settings.background.colors();
+        let rgb = |c: u32| hex(&format!("#{c:06x}"));
+        root = root.child(el().key("backdrop").absolute(ox, oy).w(w).h(h).radius(4.0)
+            .linear_gradient(std::f32::consts::FRAC_PI_4, [(0.0, rgb(a)), (1.0, rgb(b))]));
+    }
+    let radius = c.radius as f32 * k;
+    root.child(el().key("frame").absolute(inner[0], inner[1]).w(inner[2]).h(inner[3]).radius(radius).clip_rounded(radius)
+        .shadow(if radius > 0.0 { 10.0 } else { 0.0 }, if radius > 0.0 { 30.0 } else { 0.0 }, Color::BLACK.alpha(0.45))
+        .child(el().key("video").absolute(vx, vy).w(vw).h(vh).live_rect(&r.video_rect).video(&r.player, SurfaceFit::Fill)))
+}
+
+fn stage(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
+    let stage = cx.layout_size("stage").unwrap_or([SIZE.0 - 40.0, SIZE.1 - 300.0]);
+    let root = el().key("stage").w_full().grow(1.0).on_drag(crop_drag);
+    if let rune::PlayerState::Failed(e) = r.player.state() {
+        return root.center().child(text(e).font(type_::BODY).color(ink(0.6)));
+    }
+    // Rune opens the clip once its surface is mounted, so a surface is always mounted.
+    if r.player.is_playing() && r.grab == Grab::None { preview_stage(s, r, stage, root) } else { edit_stage(r, stage, root) }
+}
+
+fn timeline(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
     let accent = hex("#3b82f6");
     let width = cx.layout_size("timeline").map_or(SIZE.0 - 40.0, |[w, _]| w);
     r.track_w.set(width);
-    r.publish();
+    r.publish(&s.settings);
     let dur = r.duration();
     let x = |t: f64| if dur > 0.0 { (t / dur) as f32 * width } else { 0.0 };
     let (a, b) = r.trim();
     let mut track = el().key("timeline").w_full().h(TIMELINE_H).radius(10.0).fill(hex("#1c1c20")).clip_rounded(10.0).on_drag(timeline_drag);
-    // The filmstrip, edge to edge under everything else.
     // Cells keep the video's shape, so frames aren't stretched; each shows the decoded frame
     // nearest its middle.
     if !r.film.is_empty() {
@@ -332,6 +453,24 @@ fn timeline(r: &Review, cx: &mut Cx<Clip>) -> El {
             track = track.child(el().key(format!("film-{c}")).absolute(c as f32 * cell, 0.0).w(cell).h(TIMELINE_H).pixels(image.pixels()).opacity(0.85));
         }
     }
+    let (zoom, idle) = r.derived(&s.settings, |z, i| (z.to_vec(), i.to_vec()));
+    for (i, (p, q)) in idle.iter().enumerate() {
+        track = track.child(row().key(format!("idle-{i}")).absolute(x(*p), 0.0).w((x(*q) - x(*p)).max(1.0)).h(TIMELINE_H).center()
+            .fill(hex("#f5a524").alpha(0.22)).border(1.0, hex("#f5a524").alpha(0.5))
+            .child(text(format!("{}×", export::IDLE_SPEED as u32)).font(type_::LABEL).color(Color::WHITE)));
+    }
+    // Zoomed stretches as a band along the top, clicks as dots.
+    let mut k = 0;
+    while k + 1 < zoom.len() {
+        if zoom[k + 1].z > 1.0 || zoom[k].z > 1.0 {
+            track = track.child(el().key(format!("zoom-{k}")).absolute(x(zoom[k].t), 3.0).w((x(zoom[k + 1].t) - x(zoom[k].t)).max(1.0)).h(4.0)
+                .fill(hex("#a78bfa")));
+        }
+        k += 1;
+    }
+    for (i, (t, _, _)) in r.track.clicks.iter().enumerate() {
+        track = track.child(el().key(format!("click-{i}")).absolute(x(*t) - 3.0, TIMELINE_H - 11.0).size(6.0, 6.0).radius(3.0).fill(Color::WHITE).border(1.0, Color::BLACK.alpha(0.5)));
+    }
     track
         .child(el().key("out-l").absolute(0.0, 0.0).w(x(a)).h(TIMELINE_H).fill(Color::BLACK.alpha(0.65)))
         .child(el().key("out-r").absolute(x(b), 0.0).w((width - x(b)).max(0.0)).h(TIMELINE_H).fill(Color::BLACK.alpha(0.65)))
@@ -341,56 +480,89 @@ fn timeline(r: &Review, cx: &mut Cx<Clip>) -> El {
         .child(el().key("playhead").absolute(0.0, 0.0).live_offset(&r.playhead).w(2.0).h(TIMELINE_H).fill(Color::WHITE).shadow(0.0, 4.0, Color::BLACK.alpha(0.6)))
 }
 
+fn label(t: &str) -> El {
+    text(t.to_string()).font(type_::LABEL).color(ink(0.45))
+}
+
+fn swatches(s: &Clip) -> El {
+    let mut r = row().key("swatches").gap(8.0).center_y();
+    for b in Background::ALL {
+        let on = s.settings.background == b;
+        let (c0, c1) = b.colors();
+        let rgb = |c: u32| hex(&format!("#{c:06x}"));
+        let mut dot = el().key(format!("bg-{}", b.label())).size(22.0, 22.0).radius(11.0).help(b.label())
+            .border(if on { 2.0 } else { 1.0 }, if on { Color::WHITE } else { ink(0.2) })
+            .on_press_tx(move |s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.background = b; s.settings.save() });
+        dot = if b == Background::None {
+            dot.fill(hex("#1c1c20")).center().child(el().w(14.0).h(1.5).fill(ink(0.5)).rotate(-0.785))
+        } else {
+            dot.linear_gradient(std::f32::consts::FRAC_PI_4, [(0.0, rgb(c0)), (1.0, rgb(c1))])
+        };
+        r = r.child(dot);
+    }
+    r
+}
+
 fn toolbar(s: &Clip, r: &Review) -> El {
     let k = kit();
     let aspect = Aspect::ALL.iter().position(|a| *a == r.aspect);
     let labels: Vec<&str> = Aspect::ALL.iter().map(|a| a.label()).collect();
     let sizes: Vec<&str> = Size::ALL.iter().map(|z| z.label()).collect();
     let size = Size::ALL.iter().position(|z| *z == s.settings.size);
-    row().key("toolbar").w_full().h(28.0).gap(12.0).center_y()
-        .child(text("Crop").font(type_::LABEL).color(ink(0.45)))
-        .child(SegmentedControl::new(&labels, aspect).fit().on_pick(|s: &mut Clip, i, _| {
+    let speeds = ["1×", "1.5×", "2×"];
+    let speed = SPEEDS.iter().position(|v| *v == s.settings.speed);
+    let clicks = r.track.clicks.len();
+    let first = row().key("toolbar-1").w_full().h(28.0).gap(12.0).center_y()
+        .child(label("Crop"))
+        .child(SegmentedControl::new(&labels, aspect).fit().on_pick(|s: &mut Clip, i, tx| {
+            tx.blur();
             if let Some(r) = s.review.as_mut() {
                 let a = Aspect::ALL[i];
                 if a == Aspect::Free { r.aspect = a; r.crop = FULL } else { r.set_aspect(a) }
             }
         }).build(k))
         .child(spacer())
-        .child(text("Export").font(type_::LABEL).color(ink(0.45)))
-        .child(SegmentedControl::new(&sizes, size).fit().on_pick(|s: &mut Clip, i, _| {
-            s.settings.size = Size::ALL[i];
-            s.settings.save();
-        }).build(k))
+        .child(label("Background"))
+        .child(swatches(s));
+    let second = row().key("toolbar-2").w_full().h(28.0).gap(12.0).center_y()
+        .child(label(&if clicks > 0 { format!("Zoom on clicks ({clicks})") } else { "Zoom on clicks".into() }))
+        .child(Switch::new(s.settings.zoom).hide_label().on_toggle_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.zoom ^= true; s.settings.save() }).build(k))
+        .child(el().w(8.0))
+        .child(label("Speed up idle"))
+        .child(Switch::new(s.settings.skip_idle).hide_label().on_toggle_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.skip_idle ^= true; s.settings.save() }).build(k))
+        .child(el().w(8.0))
+        .child(label("Speed"))
+        .child(SegmentedControl::new(&speeds, speed).fit().on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.speed = SPEEDS[i]; s.settings.save() }).build(k))
+        .child(spacer())
+        .child(label("Export"))
+        .child(SegmentedControl::new(&sizes, size).fit().on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.size = Size::ALL[i]; s.settings.save() }).build(k));
+    col().key("toolbar").w_full().gap(10.0).child(first).child(second)
 }
 
 pub fn view(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
-    let (a, b) = r.trim();
-    let px = r.out_px(s.settings.size).map_or(String::new(), |(w, h)| format!("{w} × {h}"));
+    let out = r.out(&s.settings);
+    let px = out.map_or(String::new(), |((w, h), len)| format!("{}  ·  {w} × {h}", clock(len)));
     let status = match &s.phase {
         Phase::Exporting(f) => format!("Exporting… {:.0}%", f * 100.0),
         Phase::Copied(path) => format!("Copied · {}", std::fs::metadata(path).map_or(String::new(), |m| megabytes(m.len()))),
-        _ => format!("{}  ·  {}", clock(b - a), px),
+        _ => px,
     };
-    let info = row().w_full().h(20.0).gap(16.0).center_y()
+    let info = row().w_full().h(20.0).gap(14.0).center_y()
         .child(text("00:00.0 / 00:00.0").live_text(&r.clock).font(type_::MONO_CAPTION).color(ink(0.7)))
         .child(spacer())
-        .child(hint("drag video", "crop")).child(hint("drag strip", "trim")).child(hint("Space", "play"))
-        .child(hint("I / O", "in / out")).child(hint("M", if r.muted { "sound on" } else { "mute" })).child(hint("R", "reset"))
-        .child(hint("⏎", "copy")).child(hint("Esc", "discard"))
+        .child(hint("Space", if r.player.is_playing() { "edit" } else { "preview" }))
+        .child(hint("I / O", "in / out")).child(hint("Z B S", "zoom, bg, speed")).child(hint("M", "mute"))
+        .child(hint("⏎", "copy")).child(hint("⇧⏎", "copy GIF")).child(hint("Esc", "discard"))
         .child(spacer())
         .child(text(status).font(type_::MONO_CAPTION).color(match s.phase { Phase::Copied(_) => hex(GREEN), _ => ink(0.7) }));
     let mut root = col().w_full().h_full().fill(hex(BG)).padding(20.0).pt(36.0).gap(14.0);
     if s.settings.setup == crate::settings::Setup::TryIt {
         root = root.child(row().key("practice").w_full().h(34.0).px(14.0).gap(10.0).radius(9.0).center_y().fill(hex("#16233a"))
             .child(text("This is your recording.").font(type_::TITLE).color(Color::WHITE))
-            .child(text("Drag across it to crop, across the strip below to trim, then press ⏎ to copy it.").font(type_::BODY).color(ink(0.7))));
+            .child(text("Pause to crop and trim, play to preview, then press ⏎ to copy it.").font(type_::BODY).color(ink(0.7))));
     }
-    let progress = match s.phase {
-        Phase::Exporting(f) => Some(f),
-        _ => None,
-    };
-    root = root.child(stage(r, cx)).child(toolbar(s, r)).child(timeline(r, cx));
-    if let Some(f) = progress {
+    root = root.child(stage(s, r, cx)).child(toolbar(s, r)).child(timeline(s, r, cx));
+    if let Phase::Exporting(f) = s.phase {
         root = root.child(el().key("progress").w_full().h(3.0).radius(1.5).fill(ink(0.08))
             .child(el().w_frac(f.clamp(0.0, 1.0)).h(3.0).radius(1.5).fill(hex("#3b82f6"))));
     }
