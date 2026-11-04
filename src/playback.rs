@@ -35,7 +35,9 @@ struct Clock {
 impl Clock {
     fn time(&self, duration: f64) -> f64 {
         let t = if self.playing { self.at + self.since.elapsed().as_secs_f64() * self.rate } else { self.at };
-        if self.looping && duration > 0.0 && t >= duration { t % duration } else { t.min(duration.max(0.0)) }
+        // A loop wraps only while playing: paused at the end (stepped there, or trimmed to
+        // it), the time is the end, not the start.
+        if self.playing && self.looping && duration > 0.0 && t >= duration { t % duration } else { t.min(duration.max(0.0)) }
     }
 }
 
