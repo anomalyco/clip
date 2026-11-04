@@ -3,21 +3,23 @@
 //! cropped, on its background, zooming on clicks, idle stretches sped up.
 
 use crate::export::{self, Plan};
-use crate::settings::{Background, FRAME_RATES, Quality, SPEEDS, Settings, Size};
+use crate::settings::{Background, SPEEDS, Settings};
 use crate::track::Track;
-use crate::ui::{BG, GREEN, clock, hex, hint, ink, kit, megabytes};
+use crate::ui::{BG, GREEN, LINE, clock, hex, ink, kit, megabytes};
 use crate::view::{self, Source};
 use crate::zoom::{self, Key};
 use crate::{Clip, Phase};
 use rune::tok::type_;
 use rune::{Color, Cx, Drag, El, Image, Live, LiveText, Phase as DragPhase, Player, SurfaceFit, Tx, col, el, row, spacer, text};
-use rune_kit::{SegmentedControl, Switch};
+use rune_kit::{Button, ButtonVariant, SegmentedControl, Switch};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::time::Duration;
 
 pub const SIZE: (f32, f32) = (1180.0, 900.0);
 const TIMELINE_H: f32 = 56.0;
+/// The sidebar's width.
+const SIDEBAR: f32 = 236.0;
 /// Frames in the filmstrip.
 pub const FILM: usize = 14;
 const MIN_TRIM: f64 = 0.1;
@@ -548,11 +550,12 @@ fn window_color(id: u32) -> Color {
 /// Most windows offered as shots, the ones in front longest.
 const SHOT_WINDOWS: usize = 5;
 
-/// The shot picker: the whole desktop, following focus, or one window.
+/// The shot picker: the whole desktop, following focus, or one of the windows in front
+/// longest, one a line.
 fn shots(r: &Review) -> El {
     let chip = |key: String, on: bool, icon: Option<&Image>, dot: Option<Color>, name: String, shot: Source| {
-        let mut c = row().key(key).h(28.0).px(10.0).gap(7.0).radius(8.0).center_y()
-            .fill(if on { ink(0.14) } else { ink(0.04) }).border(1.0, if on { ink(0.35) } else { ink(0.08) })
+        let mut c = row().key(key).w_full().h(30.0).px(10.0).gap(8.0).radius(8.0).center_y()
+            .fill(if on { ink(0.12) } else { ink(0.0) }).border(1.0, if on { ink(0.3) } else { ink(0.0) })
             .on_press_tx(move |s: &mut Clip, tx: &mut Tx| {
                 tx.blur();
                 if let Some(r) = s.review.as_mut() { r.shot = shot }
@@ -562,15 +565,14 @@ fn shots(r: &Review) -> El {
         c.child(text(name).font(type_::LABEL).color(if on { Color::WHITE } else { ink(0.7) }))
     };
     let windows = &r.track.windows.list;
-    let mut out = row().key("shots").w_full().h(28.0).gap(8.0).center_y()
-        .child(label("Shot"))
+    let mut out = col().key("shots").w_full().gap(2.0)
         .child(chip("shot-desktop".into(), r.shot == Source::Desktop, None, None, "Desktop".into(), Source::Desktop))
         .child(chip("shot-follow".into(), r.shot == Source::Follow, None, None, "Follow focus".into(), Source::Follow));
     for w in windows.iter().take(SHOT_WINDOWS) {
         // Name the window by its app, and by its title when the app has several.
         let same_app = windows.iter().take(SHOT_WINDOWS).filter(|o| o.app == w.app).count() > 1;
         let mut name = if same_app && !w.title.is_empty() { format!("{} — {}", w.app, w.title) } else { w.app.clone() };
-        if name.chars().count() > 34 { name = name.chars().take(33).collect::<String>() + "…" }
+        if name.chars().count() > 26 { name = name.chars().take(25).collect::<String>() + "…" }
         let icon = r.icons.iter().find(|(pid, _)| *pid == w.pid).map(|(_, i)| i);
         out = out.child(chip(format!("shot-{}", w.id), r.shot == Source::Window(w.id), icon, Some(window_color(w.id)), name, Source::Window(w.id)));
     }
@@ -581,17 +583,37 @@ fn label(t: &str) -> El {
     text(t.to_string()).font(type_::LABEL).color(ink(0.45))
 }
 
+/// A small keycap: the shortcut beside the control it drives.
+fn key_cap(k: &str) -> El {
+    row().h(18.0).px(5.0).radius(4.0).center_y().fill(ink(0.08)).child(text(k.to_string()).font(type_::LABEL).color(ink(0.5)))
+}
+
+/// A sidebar section: its name and shortcut, then its control.
+fn section(name: &str, key: Option<&str>, body: El) -> El {
+    let mut head = row().w_full().h(18.0).center_y().child(label(name)).child(spacer());
+    if let Some(k) = key { head = head.child(key_cap(k)) }
+    col().w_full().gap(8.0).child(head).child(body)
+}
+
+/// A setting that's on or off, its shortcut, and its switch.
+fn toggle(name: &str, key: Option<&str>, on: bool, flip: fn(&mut Clip)) -> El {
+    let mut r = row().w_full().h(28.0).gap(8.0).center_y().child(text(name.to_string()).font(type_::BODY).color(ink(0.85)));
+    if let Some(k) = key { r = r.child(key_cap(k)) }
+    r.child(spacer())
+        .child(Switch::new(on).hide_label().on_toggle_tx(move |s: &mut Clip, tx: &mut Tx| { tx.blur(); flip(s); s.settings.save() }).build(kit()))
+}
+
 fn swatches(s: &Clip) -> El {
     let mut r = row().key("swatches").gap(8.0).center_y();
     for b in Background::ALL {
         let on = s.settings.background == b;
         let (c0, c1) = b.colors();
         let rgb = |c: u32| hex(&format!("#{c:06x}"));
-        let mut dot = el().key(format!("bg-{}", b.label())).size(22.0, 22.0).radius(11.0).help(b.label())
+        let mut dot = el().key(format!("bg-{}", b.label())).size(26.0, 26.0).radius(13.0).help(b.label())
             .border(if on { 2.0 } else { 1.0 }, if on { Color::WHITE } else { ink(0.2) })
             .on_press_tx(move |s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.background = b; s.settings.save() });
         dot = if b == Background::None {
-            dot.fill(hex("#1c1c20")).center().child(el().w(14.0).h(1.5).fill(ink(0.5)).rotate(-0.785))
+            dot.fill(hex("#1c1c20")).center().child(el().w(16.0).h(1.5).fill(ink(0.5)).rotate(-0.785))
         } else {
             dot.linear_gradient(std::f32::consts::FRAC_PI_4, [(0.0, rgb(c0)), (1.0, rgb(c1))])
         };
@@ -600,81 +622,75 @@ fn swatches(s: &Clip) -> El {
     r
 }
 
-fn toolbar(s: &Clip, r: &Review) -> El {
+/// The sidebar: only what changes from clip to clip. Quality, frame rate and export size are
+/// set once, in the home window.
+fn sidebar(s: &Clip, r: &Review) -> El {
     let k = kit();
     let aspect = Aspect::ALL.iter().position(|a| *a == r.aspect);
     let labels: Vec<&str> = Aspect::ALL.iter().map(|a| a.label()).collect();
-    let sizes: Vec<&str> = Size::ALL.iter().map(|z| z.label()).collect();
-    let size = Size::ALL.iter().position(|z| *z == s.settings.size);
     let speeds = ["1×", "1.5×", "2×"];
     let speed = SPEEDS.iter().position(|v| *v == s.settings.speed);
     let clicks = r.track.clicks.len();
-    let first = row().key("toolbar-1").w_full().h(28.0).gap(12.0).center_y()
-        .child(label("Crop"))
-        .child(SegmentedControl::new(&labels, aspect).fit().on_pick(|s: &mut Clip, i, tx| {
+    let mut bar = col().key("sidebar").w(SIDEBAR).h_full().gap(22.0);
+    if !r.track.windows.list.is_empty() { bar = bar.child(section("Shot", None, shots(r))) }
+    bar = bar
+        .child(section("Background", Some("B"), swatches(s)))
+        .child(section("Crop", Some("1–4"), SegmentedControl::new(&labels, aspect).on_pick(|s: &mut Clip, i, tx| {
             tx.blur();
             if let Some(r) = s.review.as_mut() {
                 let a = Aspect::ALL[i];
                 if a == Aspect::Free { r.aspect = a; r.crop = FULL } else { r.set_aspect(a) }
             }
-        }).build(k))
-        .child(spacer())
-        .child(label("Quality"))
-        .child(SegmentedControl::new(&Quality::ALL.map(|q| q.label()), Quality::ALL.iter().position(|q| *q == s.settings.quality)).fit()
-            .on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.quality = Quality::ALL[i]; s.settings.save() }).build(k))
-        .child(SegmentedControl::new(&["60 fps", "30 fps"], FRAME_RATES.iter().position(|f| *f == s.settings.fps)).fit()
-            .on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.fps = FRAME_RATES[i]; s.settings.save() }).build(k))
-        .child(spacer())
-        .child(label("Background"))
-        .child(swatches(s));
-    let second = row().key("toolbar-2").w_full().h(28.0).gap(12.0).center_y()
-        .child(label(&if clicks > 0 { format!("Zoom on clicks ({clicks})") } else { "Zoom on clicks".into() }))
-        .child(Switch::new(s.settings.zoom).hide_label().on_toggle_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.zoom ^= true; s.settings.save() }).build(k))
-        .child(el().w(8.0))
-        .child(label("Speed up idle"))
-        .child(Switch::new(s.settings.skip_idle).hide_label().on_toggle_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.settings.skip_idle ^= true; s.settings.save() }).build(k))
-        .child(el().w(8.0))
-        .child(label("Speed"))
-        .child(SegmentedControl::new(&speeds, speed).fit().on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.speed = SPEEDS[i]; s.settings.save() }).build(k))
-        .child(spacer())
-        .child(label("Export"))
-        .child(SegmentedControl::new(&sizes, size).fit().on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.size = Size::ALL[i]; s.settings.save() }).build(k));
-    let mut bar = col().key("toolbar").w_full().gap(10.0);
-    if !r.track.windows.list.is_empty() { bar = bar.child(shots(r)) }
-    bar.child(first).child(second)
+        }).build(k)))
+        .child(col().w_full().gap(2.0)
+            .child(toggle(&if clicks > 0 { format!("Zoom on clicks ({clicks})") } else { "Zoom on clicks".into() }, Some("Z"), s.settings.zoom, |s| s.settings.zoom ^= true))
+            .child(toggle("Speed up idle", None, s.settings.skip_idle, |s| s.settings.skip_idle ^= true)))
+        .child(section("Speed", Some("S"), SegmentedControl::new(&speeds, speed)
+            .on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.speed = SPEEDS[i]; s.settings.save() }).build(k)));
+    // What comes out, at the foot.
+    let out = r.out(&s.settings).map_or(String::new(), |((w, h), len)| format!("{w} × {h} · {} · {} fps", clock(len), s.settings.fps));
+    bar.child(spacer()).child(text(out).font(type_::MONO_CAPTION).color(ink(0.4)))
 }
 
-pub fn view(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
-    let out = r.out(&s.settings);
-    let px = out.map_or(String::new(), |((w, h), len)| {
-        let rate = s.settings.quality.bitrate(w, h, s.settings.fps).map_or("auto".into(), |b| format!("{:.0} Mbps", b as f64 / 1e6));
-        format!("{}  ·  {w} × {h}  ·  {} fps  ·  {rate}", clock(len), s.settings.fps)
-    });
+/// Copy (⏎) is the way out; GIF (⇧⏎) and Discard (Esc) beside it.
+fn actions(s: &Clip, r: &Review) -> El {
+    let k = kit();
     let status = match &s.phase {
         Phase::Exporting(f) => format!("Exporting… {:.0}%", f * 100.0),
         Phase::Copied(path) => format!("Copied · {}", std::fs::metadata(path).map_or(String::new(), |m| megabytes(m.len()))),
-        _ => px,
+        _ => String::new(),
     };
-    let info = row().w_full().h(20.0).gap(14.0).center_y()
+    row().key("actions").w_full().h(32.0).gap(10.0).center_y()
         .child(text("00:00.0 / 00:00.0").live_text(&r.clock).font(type_::MONO_CAPTION).color(ink(0.7)))
+        .child(text(status).font(type_::MONO_CAPTION).color(match s.phase { Phase::Copied(_) => hex(GREEN), _ => ink(0.6) }))
         .child(spacer())
-        .child(hint("Space", if r.player.is_playing() { "edit" } else { "preview" }))
-        .child(hint("I / O", "in / out")).child(hint("Z B S", "zoom, bg, speed")).child(hint("M", "mute"))
-        .child(hint("⏎", "copy")).child(hint("⇧⏎", "copy GIF")).child(hint("Esc", "discard"))
-        .child(spacer())
-        .child(text(status).font(type_::MONO_CAPTION).color(match s.phase { Phase::Copied(_) => hex(GREEN), _ => ink(0.7) }));
-    let mut root = col().w_full().h_full().fill(hex(BG)).padding(20.0).pt(36.0).gap(14.0);
+        .child(Button::new("Discard  Esc").variant(ButtonVariant::Ghost).shortcut("Esc")
+            .on_press_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.close_review(tx) }).build(k))
+        .child(Button::new("GIF  ⇧⏎").variant(ButtonVariant::Neutral).shortcut("⇧⏎")
+            .on_press_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.export(true) }).build(k))
+        .child(Button::new("Copy  ⏎").variant(ButtonVariant::Contrast).shortcut("⏎")
+            .on_press_tx(|s: &mut Clip, tx: &mut Tx| { tx.blur(); s.export(false) }).build(k))
+}
+
+/// The review: the take and its timeline with the actions under them, and a narrow sidebar of
+/// the few things that change from clip to clip. Every control has its key (`on_key`).
+pub fn view(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
+    let mut main = col().key("main").grow(1.0).h_full().gap(14.0);
     if s.settings.setup == crate::settings::Setup::TryIt {
-        root = root.child(row().key("practice").w_full().h(34.0).px(14.0).gap(10.0).radius(9.0).center_y().fill(hex("#16233a"))
+        main = main.child(row().key("practice").w_full().h(34.0).px(14.0).gap(10.0).radius(9.0).center_y().fill(hex("#16233a"))
             .child(text("This is your recording.").font(type_::TITLE).color(Color::WHITE))
-            .child(text("Pause to crop and trim, play to preview, then press ⏎ to copy it.").font(type_::BODY).color(ink(0.7))));
+            .child(text("Space plays it, I and O trim it, ⏎ copies it.").font(type_::BODY).color(ink(0.7))));
     }
-    root = root.child(stage(s, r, cx)).child(toolbar(s, r)).child(timeline(s, r, cx));
+    main = main.child(stage(s, r, cx)).child(timeline(s, r, cx));
     if let Phase::Exporting(f) = s.phase {
-        root = root.child(el().key("progress").w_full().h(3.0).radius(1.5).fill(ink(0.08))
+        main = main.child(el().key("progress").w_full().h(3.0).radius(1.5).fill(ink(0.08))
             .child(el().w_frac(f.clamp(0.0, 1.0)).h(3.0).radius(1.5).fill(hex("#3b82f6"))));
     }
-    root.child(info)
+    main = main.child(actions(s, r));
+    row().w_full().h_full().fill(hex(BG)).padding(20.0).pt(36.0).gap(22.0)
+        .child(main)
+        .child(el().w(1.0).h_full().fill(hex(LINE)))
+        .child(sidebar(s, r))
 }
 
 /// The filmstrip, decoded on a thread; lands only if this recording still shows.
