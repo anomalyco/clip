@@ -91,6 +91,8 @@ struct Hud {
 }
 
 const TOAST: Duration = Duration::from_millis(1600);
+/// The error bar's height, along the window's bottom.
+const ERROR_BAR: f32 = 32.0;
 const RETAKE_GUARD: Duration = Duration::from_millis(900);
 /// Raw recordings kept in Caches; older ones are deleted when a new one starts.
 const KEEP_RAW: usize = 4;
@@ -341,6 +343,7 @@ impl Clip {
                 Ok(path) => {
                     tx.copy_rich(ClipboardContent::default().with_files([path.clone()]));
                     if sounds { sound::play(sound::Cue::Copied) }
+                    s.error = None;
                     s.phase = Phase::Copied(path);
                     let me = s.me.clone();
                     std::thread::spawn(move || {
@@ -528,9 +531,11 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     // Windows and Linux: Clip's own title bar over the band the views leave for macOS's.
     #[cfg(not(target_os = "macos"))]
     let body = el().w_full().h_full().child(body.w_full().h_full()).child(ui::titlebar());
+    // The bar is pinned over the body's bottom padding: the home window has no room to give
+    // up, so in the flow it got a few pixels and the message was unreadable.
     match &s.error {
-        Some(e) => rune::col().w_full().h_full().child(body.grow(1.0))
-            .child(row().key("error").w_full().h(32.0).px(16.0).center_y().fill(hex("#3a1416"))
+        Some(e) => el().w_full().h_full().child(body.w_full().h_full().pb(ERROR_BAR))
+            .child(row().key("error").pin(Some(0.0), None, Some(0.0), Some(0.0)).h(ERROR_BAR).px(16.0).center_y().fill(hex("#3a1416"))
                 .child(text(e.clone()).font(type_::BODY).color(Color::WHITE))
                 .on_press(|s: &mut Clip| s.error = None)),
         None => body,
