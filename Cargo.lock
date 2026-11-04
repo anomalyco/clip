@@ -296,6 +296,9 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
  "rune",
+ "rune-kit",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2241,6 +2244,16 @@ dependencies = [
  "xkbcommon",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "rune-kit"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=e6371c483905b8a39557d5b0442e0612b68f37ee#e6371c483905b8a39557d5b0442e0612b68f37ee"
+dependencies = [
+ "rune",
+ "rune-motion",
+ "unicode-segmentation",
 ]
 
 [[package]]

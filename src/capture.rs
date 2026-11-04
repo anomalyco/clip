@@ -19,6 +19,11 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const FPS: i32 = 60;
 
+unsafe extern "C" {
+    static kCGDisplayStreamYCbCrMatrix_ITU_R_709_2: &'static objc2_core_foundation::CFString;
+    static kCGColorSpaceITUR_709: &'static objc2_core_foundation::CFString;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CGPoint { x: f64, y: f64 }
@@ -29,8 +34,6 @@ unsafe extern "C" {
     fn CFRelease(cf: *mut std::ffi::c_void);
     fn CGGetDisplaysWithPoint(point: CGPoint, max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGMainDisplayID() -> u32;
-    fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
 }
 
 /// The display the pointer is on.
@@ -43,11 +46,6 @@ fn pointer_display() -> u32 {
         let (mut id, mut count) = (0u32, 0u32);
         if CGGetDisplaysWithPoint(point, 1, &mut id, &mut count) == 0 && count == 1 { id } else { CGMainDisplayID() }
     }
-}
-
-/// Screen Recording permission: asks once (the system prompt), then System Settings decides.
-pub fn ensure_permission() -> bool {
-    unsafe { CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() }
 }
 
 struct Ivars {
@@ -126,8 +124,16 @@ fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
     rx.recv_timeout(TIMEOUT).map_err(|_| "ScreenCaptureKit didn't answer".to_string())?.map(|c| c.0)
 }
 
+/// What goes into a recording besides the screen.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub system_audio: bool,
+    pub microphone: bool,
+    pub show_clicks: bool,
+}
+
 /// Start recording the display under the pointer, at its full backing resolution, into `dir`.
-pub fn start(dir: &Path) -> Result<Recording, String> {
+pub fn start(dir: &Path, opts: Options) -> Result<Recording, String> {
     let content = shareable_content().map_err(|e| format!("Screen Recording permission is needed ({e})"))?;
     let id = pointer_display();
     let displays = unsafe { content.displays() };
@@ -148,7 +154,16 @@ pub fn start(dir: &Path) -> Result<Recording, String> {
         config.setHeight(even(rect.size.height));
         config.setMinimumFrameInterval(CMTime::new(1, FPS));
         config.setShowsCursor(true);
-        config.setQueueDepth(8);
+        config.setShowMouseClicks(opts.show_clicks);
+        // 4:2:0 YUV is what the encoder takes (1.5 bytes a pixel against BGRA's 4), and a
+        // shallow queue: at 5K each frame in the pool is 22 MB.
+        config.setPixelFormat(0x34323076); // '420v'
+        config.setColorMatrix(kCGDisplayStreamYCbCrMatrix_ITU_R_709_2);
+        config.setColorSpaceName(kCGColorSpaceITUR_709);
+        config.setQueueDepth(4);
+        config.setCapturesAudio(opts.system_audio);
+        config.setExcludesCurrentProcessAudio(true);
+        config.setCaptureMicrophone(opts.microphone);
     }
 
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;

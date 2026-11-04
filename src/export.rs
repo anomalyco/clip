@@ -20,6 +20,18 @@ pub struct Cut {
     pub end: f64,
     /// x, y, w, h in source pixels.
     pub crop: [u32; 4],
+    /// Scale the crop down to fit this (long edge, short edge), when set.
+    pub fit: Option<(u32, u32)>,
+}
+
+/// `w` × `h` scaled down (never up) to fit `bounds`, even on both sides.
+pub fn fitted(w: u32, h: u32, bounds: Option<(u32, u32)>) -> (u32, u32) {
+    let k = bounds.map_or(1.0, |(long, short)| {
+        let (big, small) = (w.max(h) as f64, w.min(h) as f64);
+        (long as f64 / big).min(short as f64 / small).min(1.0)
+    });
+    let even = |v: u32| ((v as f64 * k).round() as u32).max(2) & !1;
+    (even(w), even(h))
 }
 
 /// H.264's largest frame at level 5.2. Bigger crops go out as HEVC.
@@ -49,7 +61,9 @@ pub fn run(source: &Path, cut: Cut, dir: &Path, progress: impl Fn(f32)) -> Resul
     let out = dir.join(format!("Clip {}.mp4", stamp()));
     let [x, y, w, h] = cut.crop;
     let (w, h) = (w.max(2) & !1, h.max(2) & !1);
-    let preset = if w > H264_MAX.0 || h > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" } else { "AVAssetExportPresetHighestQuality" };
+    let (ow, oh) = fitted(w, h, cut.fit);
+    let k = ow as f64 / w as f64;
+    let preset = if ow > H264_MAX.0 || oh > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" } else { "AVAssetExportPresetHighestQuality" };
     let (done_tx, done) = mpsc::channel::<()>();
     let session = autoreleasepool(|_| -> Result<Retained<AnyObject>, String> {
         unsafe {
@@ -59,13 +73,14 @@ pub fn run(source: &Path, cut: Cut, dir: &Path, progress: impl Fn(f32)) -> Resul
             let duration: CMTime = msg_send![&asset, duration];
 
             let layer: Retained<AnyObject> = msg_send![class!(AVMutableVideoCompositionLayerInstruction), videoCompositionLayerInstructionWithAssetTrack: &*track];
-            let shift = CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: -(x as f64), ty: -(y as f64) };
+            // Move the crop's corner to the origin, then scale it to the output size.
+            let shift = CGAffineTransform { a: k, b: 0.0, c: 0.0, d: k, tx: -(x as f64) * k, ty: -(y as f64) * k };
             let _: () = msg_send![&layer, setTransform: shift, atTime: time(0.0)];
             let instruction: Retained<AnyObject> = msg_send![class!(AVMutableVideoCompositionInstruction), videoCompositionInstruction];
             let _: () = msg_send![&instruction, setTimeRange: CMTimeRange { start: time(0.0), duration }];
             let _: () = msg_send![&instruction, setLayerInstructions: &*NSArray::from_retained_slice(&[layer])];
             let composition: Retained<AnyObject> = msg_send![class!(AVMutableVideoComposition), videoComposition];
-            let _: () = msg_send![&composition, setRenderSize: NSSize::new(w as f64, h as f64)];
+            let _: () = msg_send![&composition, setRenderSize: NSSize::new(ow as f64, oh as f64)];
             let _: () = msg_send![&composition, setFrameDuration: CMTime::new(1, 60)];
             let _: () = msg_send![&composition, setInstructions: &*NSArray::from_retained_slice(&[instruction])];
 

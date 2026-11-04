@@ -1,4 +1,5 @@
-//! Double-tap of a lone modifier key, seen from anywhere without any permission prompt.
+//! Taps of a lone modifier key, seen from anywhere without any permission prompt: a double tap
+//! starts recording, a single tap stops it.
 //!
 //! Carbon hotkeys need a chord, and global key monitors need Accessibility or Input
 //! Monitoring. Polling the HID modifier state does not, so a thread reads it every 8 ms
@@ -59,33 +60,61 @@ const TAP: Duration = Duration::from_millis(280);
 /// The second tap has to start this soon after the first ends.
 const GAP: Duration = Duration::from_millis(320);
 
-/// Calls `fire` on every double tap, on its own thread, for the life of the process.
-pub fn watch(trigger: Trigger, fire: impl Fn() + Send + 'static) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// The key went down or up on its own (for drawing it pressed).
+    Down,
+    Up,
+    /// A clean short press and release.
+    Tap,
+    /// The second press of two clean taps, sent on the press.
+    Double,
+}
+
+/// The tap detector, fed the modifier flags and the key-down counter on every poll.
+pub struct Taps {
+    trigger: Trigger,
+    was_down: bool,
+    pressed: Option<(Instant, u32)>,
+    last_tap: Option<(Instant, u32)>,
+}
+
+impl Taps {
+    pub fn new(trigger: Trigger) -> Self {
+        Self { trigger, was_down: false, pressed: None, last_tap: None }
+    }
+
+    pub fn step(&mut self, flags: u64, keys: u32, now: Instant, send: &mut impl FnMut(Event)) {
+        if self.trigger.dirty(flags) {
+            (self.pressed, self.last_tap) = (None, None);
+        }
+        let down = self.trigger.down(flags);
+        if down && !self.was_down {
+            send(Event::Down);
+            if self.last_tap.is_some_and(|(at, k)| now - at < GAP && k == keys) {
+                (self.pressed, self.last_tap) = (None, None);
+                send(Event::Double);
+            } else {
+                self.pressed = Some((now, keys));
+                self.last_tap = None;
+            }
+        } else if !down && self.was_down {
+            send(Event::Up);
+            self.last_tap = self.pressed.take().filter(|&(at, k)| now - at < TAP && k == keys).map(|_| (now, keys));
+            if self.last_tap.is_some() { send(Event::Tap) }
+        }
+        self.was_down = down;
+    }
+}
+
+/// Calls `send` with each event, on its own thread, for the life of the process.
+pub fn watch(trigger: Trigger, mut send: impl FnMut(Event) + Send + 'static) {
     std::thread::Builder::new().name("clip-hotkey".into()).spawn(move || {
-        let mut was_down = false;
-        let mut pressed: Option<(Instant, u32)> = None;
-        let mut last_tap: Option<(Instant, u32)> = None;
+        let mut taps = Taps::new(trigger);
         loop {
             std::thread::sleep(Duration::from_millis(8));
             let (flags, keys) = unsafe { (CGEventSourceFlagsState(HID_STATE), CGEventSourceCounterForEventType(HID_STATE, KEY_DOWN)) };
-            if trigger.dirty(flags) {
-                (pressed, last_tap) = (None, None);
-            }
-            let down = trigger.down(flags);
-            let now = Instant::now();
-            if down && !was_down {
-                let second = last_tap.is_some_and(|(at, k)| now - at < GAP && k == keys);
-                if second {
-                    (pressed, last_tap) = (None, None);
-                    fire();
-                } else {
-                    pressed = Some((now, keys));
-                    last_tap = None;
-                }
-            } else if !down && was_down {
-                last_tap = pressed.take().filter(|&(at, k)| now - at < TAP && k == keys).map(|_| (now, keys));
-            }
-            was_down = down;
+            taps.step(flags, keys, Instant::now(), &mut send);
         }
     }).expect("hotkey thread");
 }
