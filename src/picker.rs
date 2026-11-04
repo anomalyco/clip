@@ -8,18 +8,26 @@ use crate::Clip;
 use rune::tok::type_;
 use rune::{AppHandle, Color, Cx, Drag, El, KeyEvent, Phase as DragPhase, PointerPress, Tx, el, row, text};
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct CGRect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGDisplayBounds(display: u32) -> CGRect;
 }
 
 /// A display's frame in global points, top-left origin.
+#[cfg(target_os = "macos")]
 pub fn display_bounds(id: u32) -> [f64; 4] {
     let r = unsafe { CGDisplayBounds(id) };
     [r.x, r.y, r.w, r.h]
+}
+
+#[cfg(target_os = "linux")]
+pub fn display_bounds(id: u32) -> [f64; 4] {
+    crate::capture::display_bounds(id)
 }
 
 #[derive(Clone, Debug)]

@@ -1,9 +1,13 @@
 //! Quiet system sounds for start, stop and copy. NSSound plays them asynchronously; Clip's own
 //! audio is excluded from recordings, so the start sound never lands in one.
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
 use objc2::{class, msg_send};
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
 
 #[derive(Clone, Copy)]
@@ -18,6 +22,27 @@ pub fn play(cue: Cue) {
     std::thread::spawn(move || play_now(cue));
 }
 
+/// The freedesktop sound theme's cues through PipeWire or PulseAudio, whichever player is
+/// there; quietly nothing when neither is.
+#[cfg(target_os = "linux")]
+fn play_now(cue: Cue) {
+    let name = match cue {
+        Cue::Start => "message-new-instant",
+        Cue::Stop => "complete",
+        Cue::Copied => "bell",
+    };
+    let file = format!("/usr/share/sounds/freedesktop/stereo/{name}.oga");
+    if !std::path::Path::new(&file).is_file() { return }
+    for (player, args) in [("pw-play", vec!["--volume", "0.35"]), ("paplay", vec!["--volume", "23000"])] {
+        if let Ok(mut child) = std::process::Command::new(player).args(args).arg(&file)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+            let _ = child.wait();
+            return;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn play_now(cue: Cue) {
     let name = match cue {
         Cue::Start => "Tink",

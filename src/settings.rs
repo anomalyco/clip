@@ -141,12 +141,22 @@ impl Default for Settings {
     }
 }
 
-/// Application Support on macOS, %APPDATA%\Clip on Windows.
-fn path() -> PathBuf {
-    if cfg!(windows) {
-        return std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| crate::home().join("AppData\\Roaming")).join("Clip\\settings.json");
+/// Where Clip keeps what it remembers: Application Support on macOS, %APPDATA%\Clip on
+/// Windows, the XDG config directory on Linux.
+pub fn dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    { crate::home().join("Library/Application Support/Clip") }
+    #[cfg(windows)]
+    { std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| crate::home().join("AppData\\Roaming")).join("Clip") }
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .unwrap_or_else(|| crate::home().join(".config")).join("clip")
     }
-    crate::home().join("Library/Application Support/Clip/settings.json")
+}
+
+fn path() -> PathBuf {
+    dir().join("settings.json")
 }
 
 const VERSION: u32 = 1;

@@ -58,6 +58,17 @@ pub fn on_screen(min: f64) -> Vec<Info> {
     }
 }
 
+/// No window list on Linux yet: Wayland has none to give, and X11's isn't read.
+#[cfg(target_os = "linux")]
+pub fn on_screen(_min: f64) -> Vec<Info> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+pub fn app_path(_pid: i32) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// The app bundle a process runs from, for its icon.
 #[cfg(target_os = "macos")]
 pub fn app_path(pid: i32) -> Option<std::path::PathBuf> {

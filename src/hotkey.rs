@@ -8,6 +8,12 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::watch;
+
 #[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1; // kCGEventSourceStateHIDSystemState
 #[cfg(target_os = "macos")]

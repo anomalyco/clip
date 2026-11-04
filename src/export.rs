@@ -4,7 +4,8 @@
 //! GIF; the sound comes from an AVMutableComposition of the trimmed range with each stretch
 //! scaled to its speed (`scaleTimeRange`, pitch kept).
 
-use crate::settings::{Background, Quality};
+use crate::settings::{Background, Quality, Settings};
+use crate::track::Track;
 use crate::zoom::{self, Key};
 #[cfg(target_os = "macos")]
 use objc2::rc::{Retained, autoreleasepool};
@@ -127,7 +128,7 @@ fn source_at(segs: &[(f64, f64, f64)], tau: f64) -> f64 {
 }
 
 /// The local time for the export's name, as the Finder names screenshots.
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 fn stamp() -> String {
     let out = std::process::Command::new("date").arg("+%Y-%m-%d at %H.%M.%S").output().ok();
     out.and_then(|o| String::from_utf8(o.stdout).ok()).map(|s| s.trim().to_string()).unwrap_or_else(|| "clip".into())
@@ -174,6 +175,20 @@ pub fn frame_radius(canvas: &Canvas, corner: f64, video: (u32, u32), shown: [f64
     let reach = [(left, top), (right, top), (left, bottom), (right, bottom)].iter()
         .map(|&(a, b)| (corner - a.max(b)).max(0.0)).fold(0.0, f64::max);
     canvas.radius.max(reach * CORNER_COVER * k)
+}
+
+/// The plan the settings make of a whole recording with no review: the full take, the
+/// Desktop shot of all of it, zoomed where it was clicked and its idle stretches sped up when
+/// the settings say so. Linux exports every take this way; `--export` does on every platform.
+pub fn plan_default(track: &Track, settings: &Settings, video: (u32, u32), duration: f64, gif: bool) -> Plan {
+    let px = (video.0 as f64, video.1 as f64);
+    let (views, size) = crate::view::plan(crate::view::Source::Desktop, &track.windows, [0.0, 0.0, 1.0, 1.0], px, 0.0, duration);
+    let zoom = if settings.zoom { zoom::plan(&track.clicks, |t| crate::view::sample(&views, t), 0.0, duration) } else { Vec::new() };
+    let idle = if settings.skip_idle { track.idle(0.0, duration) } else { Vec::new() };
+    Plan {
+        start: 0.0, end: duration, views, video, size, fit: settings.size.bounds(), speed: settings.speed, idle, zoom,
+        background: settings.background, corner: track.corner, quality: settings.quality, fps: settings.fps, gif,
+    }
 }
 
 /// The recording's sound tracks, trimmed and each stretch scaled to its speed, as the

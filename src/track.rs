@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[path = "track_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::pointer;
+
 #[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1;
 #[cfg(target_os = "macos")]
@@ -105,6 +111,7 @@ pub struct Tracker {
 #[cfg(target_os = "macos")]
 impl Tracker {
     /// `windows`: also log the windows over `frame` (for a whole-screen recording).
+    #[cfg(target_os = "macos")]
     pub fn start(frame: [f64; 4], t0: Instant, windows: bool) -> Tracker {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
