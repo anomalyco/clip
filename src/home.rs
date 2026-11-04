@@ -9,7 +9,7 @@ use rune::tok::type_;
 use rune::{Color, Cx, DragItem, El, Tx, col, el, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, SegmentedControl, Switch};
 
-pub const SETUP_SIZE: (f32, f32) = (640.0, 560.0);
+pub const SETUP_SIZE: (f32, f32) = (640.0, 640.0);
 pub const HOME_SIZE: (f32, f32) = (760.0, 960.0);
 
 fn page(body: El, action: El, step: Option<usize>) -> El {
@@ -40,8 +40,14 @@ fn heading(title: &str, lead: &str) -> El {
         .child(text(lead.to_string()).font(LEAD).color(ink(0.6)).w(460.0).wrap().align(rune::Align::Center))
 }
 
+fn icon(s: &Clip, size: f32) -> El {
+    let e = el().key("icon").size(size, size);
+    match &s.icon { Some(i) => e.pixels(i.pixels()), None => e }
+}
+
 fn welcome(s: &Clip) -> El {
-    let body = col().gap(30.0).center()
+    let body = col().gap(26.0).center()
+        .child(icon(s, 96.0))
         .child(keys_demo(s))
         .child(heading("Clip", "Record your screen without leaving what you're doing. Trim it, crop it, and paste it anywhere."));
     let go = Button::new("Get started").variant(ButtonVariant::Contrast).on_press_tx(|s: &mut Clip, tx: &mut Tx| s.set_setup(Setup::Permissions, tx)).build(kit());
@@ -128,7 +134,7 @@ fn home(s: &Clip) -> El {
         .child(el().size(7.0, 7.0).radius(3.5).fill(hex(if ready { GREEN } else { "#f5a524" })))
         .child(text(if ready { format!("Ready · double-tap {}", s.key_name) } else { "Screen Recording is off".into() }).font(type_::LABEL).color(ink(0.75)));
     let top = row().key("top").w_full().gap(12.0).center_y()
-        .child(text("Clip").font(DISPLAY).color(Color::WHITE)).child(spacer()).child(badge);
+        .child(icon(s, 44.0)).child(text("Clip").font(DISPLAY).color(Color::WHITE)).child(spacer()).child(badge);
 
     let mut grid = col().key("recent").w_full().gap(14.0);
     if s.recent.is_empty() {

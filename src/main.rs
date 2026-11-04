@@ -94,6 +94,7 @@ pub struct Clip {
     worker: mpsc::Sender<Cmd>,
     waker: Option<Waker>,
     pub images: Option<ImageCache>,
+    pub icon: Option<Image>,
     pub review: Option<Review>,
     pub asked_screen: bool,
     pub asked_mic: bool,
@@ -522,7 +523,9 @@ fn main() {
         on_key: Some(on_key),
         poll: Some(poll),
         setup: Some(|s: &mut Clip, w: Waker| {
-            s.images = Some(ImageCache::new(w.clone()));
+            let images = ImageCache::new(w.clone());
+            s.icon = Some(images.load(&include_bytes!("../assets/clip-icon-256.png")[..]));
+            s.images = Some(images);
             if let Some(r) = &s.review { r.player.set_waker(w.clone()) }
             s.waker = Some(w);
         }),
@@ -569,7 +572,7 @@ fn main() {
     let first_run = settings.setup != Setup::Done;
     let opener = me.clone();
     let app = app.args(Vec::new()).init(move || Clip {
-        phase: Phase::Idle, settings, me, hud, picker, picking_display: 0, worker, waker: None, images: None, review: None,
+        phase: Phase::Idle, settings, me, hud, picker, picking_display: 0, worker, waker: None, images: None, icon: None, review: None,
         asked_screen: false, asked_mic: false, key_down: false, login: None, mic_ok: false, screen_seen: permissions::Access::Off, recent: Vec::new(), toast: None,
         key_name: trigger.name, stopped_at: None, started_at: None, traced_frame: false, error: None,
     });
