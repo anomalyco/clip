@@ -17,8 +17,12 @@ https://anoma.ly/release/clip/
       └─ macos-arm64-dmg  Clip.dmg   notarized DMG (download page)
 ```
 
-The latest stable DMG is always at
-`https://anoma.ly/release/clip/desktop/stable/macos-arm64-dmg`.
+Each published build is also a GitHub release carrying the same bytes as
+`Clip.dmg` and `Clip.zip`: stable releases are Latest, so
+`https://github.com/anomalyco/clip/releases/latest/download/Clip.dmg` (the
+README's link) and `https://anoma.ly/release/clip/desktop/stable/macos-arm64-dmg`
+are always the newest stable DMG. Dev builds are prereleases tagged
+`v0.0.0-dev-<run>`.
 
 ## Channels
 

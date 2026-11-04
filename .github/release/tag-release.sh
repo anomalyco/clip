@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tag-release.sh: pushes the lightweight tag CLIP_RELEASE_TAG at the released
+# tag-release.sh: pushes the lightweight tag CLIP_RELEASE_TAG (v<version>, or a dev
+# build's v0.0.0-dev-<run>) at the released
 # commit SHA (the checked-out HEAD) with the job's GITHUB_TOKEN, which the
 # checkout left in git's config. Release runs it last, after every platform
 # published, so a failed release leaves no tag; tags trigger nothing. A rerun
@@ -9,7 +10,7 @@
 . "$(dirname "$0")/lib.sh"
 
 tag=$CLIP_RELEASE_TAG
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-test-[0-9]+)?$ ]] || die "Unexpected tag $tag."
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-test-[0-9]+|-dev-[0-9]+)?$ ]] || die "Unexpected tag $tag."
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "The checkout is not the released commit $SHA."
 git() { command git -c core.hooksPath=/dev/null "$@"; }
 

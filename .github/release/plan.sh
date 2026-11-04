@@ -37,7 +37,8 @@ case "$CHANNEL" in
     if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_REF" != dev ]; then die "The $CHANNEL channel builds ref dev, not $INPUT_REF."; fi
     # Display text only: installs follow the channel's current release.
     number=$GITHUB_RUN_NUMBER
-    release_channel=dev release_version="0.0.0-dev-$number" tag=""
+    # Tagged v0.0.0-dev-<run> for its GitHub prerelease.
+    release_channel=dev release_version="0.0.0-dev-$number" tag="v0.0.0-dev-$number"
     notes="https://github.com/$GITHUB_REPOSITORY/commit/$SHA"
     if [ "$CHANNEL" = check ]; then tag="v0.0.0-test-$number"; fi
     ;;

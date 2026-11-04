@@ -27,7 +27,9 @@ name: Release
 #   v0.0.0-test-<run> tag to prove it can tag.
 # - stable: a dispatch from production publishes the Cargo.toml version. Only
 #   after it published does the last job tag v<version> on the released commit
-#   and create the GitHub release, so a failed run leaves no tag.
+#   and create the GitHub release (Latest, with Clip.dmg and Clip.zip), so a
+#   failed run leaves no tag. A dev build gets a GitHub prerelease the same
+#   way, tagged v0.0.0-dev-<run>.
 on:
   workflow_dispatch:
     inputs:
@@ -272,15 +274,15 @@ jobs:
           { echo '### Manifest'; echo '```json'; cat "$dist/manifest.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # Last, once the release service published: tags v<version> on the released
-  # commit and mirrors the files to its GitHub release, with the built-in
-  # token; a failed run leaves no tag. A check run pushes and deletes a
-  # throwaway v0.0.0-test-<run> tag to prove the token can tag.
+  # commit and mirrors the files to its GitHub release (a prerelease for dev),
+  # with the built-in token; a failed run leaves no tag. A check run pushes and
+  # deletes a throwaway v0.0.0-test-<run> tag to prove the token can tag.
   github:
     name: Tag and GitHub release
     needs: [plan, sign-macos, verify-macos, publish]
     if: >-
       ${{ !cancelled() && (
-        (needs.plan.outputs.channel == 'stable' && needs.publish.result == 'success')
+        (needs.plan.outputs.channel != 'check' && needs.publish.result == 'success')
         || (needs.plan.outputs.channel == 'check' && needs.verify-macos.result == 'success') ) }}
     runs-on: ubuntu-24.04
     permissions:
@@ -306,13 +308,13 @@ jobs:
           CLIP_RELEASE_TAG_TEST: ${{ needs.plan.outputs.channel == 'check' && '1' || '' }}
         run: bash .github/release/tag-release.sh
       - name: Download
-        if: needs.plan.outputs.channel == 'stable'
+        if: needs.plan.outputs.channel != 'check'
         uses: ./.github/release/download
         with:
           pattern: sign-macos
           digests: sign-macos=${{ needs.sign-macos.outputs.digest }}
       - name: GitHub release
-        if: needs.plan.outputs.channel == 'stable'
+        if: needs.plan.outputs.channel != 'check'
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP/in/sign-macos"
