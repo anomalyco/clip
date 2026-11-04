@@ -36,7 +36,7 @@ NSGraphicsContext.restoreGraphicsState()
 // A hairline highlight on the edge.
 let edge = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: radius - 1, yRadius: radius - 1)
 edge.lineWidth = 2
-NSColor.white.withAlphaComponent(0.14).setStroke()
+NSColor.white.withAlphaComponent(0.08).setStroke()
 edge.stroke()
 NSGraphicsContext.restoreGraphicsState()
 
