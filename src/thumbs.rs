@@ -56,6 +56,15 @@ fn rgba(image: *const c_void) -> Option<Frame> {
 
 /// `count` frames spread over the movie, each fitting `max_px` (width, height).
 pub fn frames(path: &Path, times: &[f64], max_px: (f64, f64)) -> Vec<Option<Frame>> {
+    decode(path, times, max_px, false)
+}
+
+/// The frame at exactly `t`, full size (for checking the renderer against the export).
+pub fn frame_at(path: &Path, t: f64) -> Option<Frame> {
+    decode(path, &[t], (16384.0, 16384.0), true).pop().flatten()
+}
+
+fn decode(path: &Path, times: &[f64], max_px: (f64, f64), exact: bool) -> Vec<Option<Frame>> {
     objc2::rc::autoreleasepool(|_| unsafe {
         let Some(p) = path.to_str() else { return Vec::new() };
         let url = NSURL::fileURLWithPath(&NSString::from_str(p));
@@ -63,7 +72,7 @@ pub fn frames(path: &Path, times: &[f64], max_px: (f64, f64)) -> Vec<Option<Fram
         let generator: Retained<AnyObject> = msg_send![class!(AVAssetImageGenerator), assetImageGeneratorWithAsset: &*asset];
         let _: () = msg_send![&generator, setAppliesPreferredTrackTransform: true];
         let _: () = msg_send![&generator, setMaximumSize: NSSize::new(max_px.0, max_px.1)];
-        let loose = CMTime::new(1, 2);
+        let loose = if exact { CMTime::new(0, 1) } else { CMTime::new(1, 2) };
         let _: () = msg_send![&generator, setRequestedTimeToleranceBefore: loose];
         let _: () = msg_send![&generator, setRequestedTimeToleranceAfter: loose];
         times.iter().map(|&t| {

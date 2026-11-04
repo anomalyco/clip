@@ -10,12 +10,13 @@ mod hotkey;
 mod menubar;
 mod permissions;
 mod picker;
+mod pipeline;
+mod render;
 mod review;
 mod settings;
 mod sound;
 mod thumbs;
 mod track;
-mod transcode;
 mod ui;
 mod updater;
 mod view;
@@ -546,6 +547,7 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
 
 fn main() {
     if std::env::args().any(|a| a == "--screen-check") { permissions::screen_check_main() }
+    if std::env::args().nth(1).as_deref() == Some("--render-frame") { render::frame_cli(&std::env::args().skip(2).collect::<Vec<_>>()) }
     let trigger = hotkey::Trigger::from_env();
     let settings = Settings::load();
     let spec = AppSpec {

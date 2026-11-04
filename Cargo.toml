@@ -20,6 +20,14 @@ objc2-av-foundation = "0.3.2"
 libc = "0.2"
 sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
+pollster = "1"
+png = "0.17"
+
+# The renderer's GPU (src/render.rs): the wgpu Rune draws with, on each platform's backend.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "metal"] }
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "vulkan"] }
 
 [build-dependencies]
 cc = "1"

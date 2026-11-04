@@ -319,12 +319,15 @@ dependencies = [
  "objc2-core-media",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "png 0.17.16",
+ "pollster",
  "rune",
  "rune-kit",
  "serde",
  "serde_json",
  "sha2",
  "ureq",
+ "wgpu",
 ]
 
 [[package]]
