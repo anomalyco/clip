@@ -310,7 +310,11 @@ impl Clip {
     pub fn export(&mut self, gif: bool) {
         if self.phase != Phase::Review { return }
         let Some(r) = &self.review else { return };
-        let Some(plan) = r.plan(&self.settings, gif) else { return };
+        // No plan while the first frame hasn't decoded, or the player failed (reported already).
+        let Some(plan) = r.plan(&self.settings, gif) else {
+            if !r.failed.get() { self.error = Some("The recording hasn't loaded yet".into()) }
+            return;
+        };
         r.player.pause();
         let source = r.source.clone();
         self.export_plan(source, plan);
@@ -322,14 +326,17 @@ impl Clip {
         let (me, sounds) = (self.me.clone(), self.settings.sounds);
         std::thread::spawn(move || {
             let progress = me.clone();
-            let result = export::run(&source, &plan, &clips_dir(), move |f| {
-                progress.update_if(move |s, _| {
-                    let Phase::Exporting(old) = s.phase else { return false };
-                    // Redraw only when the shown percent changes.
-                    s.phase = Phase::Exporting(f);
-                    (old * 100.0) as u32 != (f * 100.0) as u32
-                });
-            });
+            // A panic in the export must still end the Exporting phase.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                export::run(&source, &plan, &clips_dir(), move |f| {
+                    progress.update_if(move |s, _| {
+                        let Phase::Exporting(old) = s.phase else { return false };
+                        // Redraw only when the shown percent changes.
+                        s.phase = Phase::Exporting(f);
+                        (old * 100.0) as u32 != (f * 100.0) as u32
+                    });
+                })
+            })).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
             me.update(move |s, tx| match result {
                 Ok(path) => {
                     tx.copy_rich(ClipboardContent::default().with_files([path.clone()]));
@@ -342,7 +349,8 @@ impl Clip {
                     });
                 }
                 Err(e) => {
-                    s.phase = Phase::Review;
+                    // The review may have been closed while it exported.
+                    s.phase = if s.review.is_some() { Phase::Review } else { Phase::Idle };
                     s.error = Some(e);
                 }
             });
