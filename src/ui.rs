@@ -64,7 +64,7 @@ pub fn titlebar() -> El {
     row().key("titlebar").absolute(0.0, 0.0).w_full().h(TITLEBAR).justify_end().center_y().gap(BUTTON_GAP).pr(BUTTON_INSET)
         .window_drag()
         .child(window_button("minimize", minimize_glyph(), false, |tx| tx.minimize()))
-        .child(window_button("maximize", maximize_glyph(), false, |_| {}))
+        .child(window_button("maximize", maximize_glyph(), false, |tx| tx.toggle_maximize()))
         .child(window_button("close", close_glyph(), true, |tx| tx.close_window()))
 }
 
