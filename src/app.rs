@@ -595,7 +595,8 @@ fn app_main() {
     let worker = worker(me.clone(), hud.clone());
     let keys = me.clone();
     hotkey::watch(trigger, move |ev| keys.update_if(move |s, tx| s.hotkey(ev, tx)));
-    // `toggle`, `full`, `export`, `gif`, `home` and `quit` on stdin drive it from a script.
+    // `toggle`, `full`, `export`, `gif`, `home`, `close`, `open <path>` and `quit` on stdin drive
+    // it from a script.
     let script = me.clone();
     std::thread::spawn(move || {
         for line in std::io::stdin().lines().map_while(Result::ok) {
@@ -606,7 +607,11 @@ fn app_main() {
                 "gif" => script.update(|s, _| s.export(true)),
                 "home" => script.update(|s, tx| s.show(tx)),
                 "quit" => script.update(|_, tx| tx.quit()),
-                _ => {}
+                "close" => script.update(|s, tx| s.close_review(tx)),
+                line => if let Some(path) = line.strip_prefix("open ") {
+                    let path = PathBuf::from(path);
+                    script.update(move |s, tx| s.load(path, true, tx));
+                },
             }
         }
     });
