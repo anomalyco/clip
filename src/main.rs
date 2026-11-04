@@ -2,42 +2,57 @@
 //! the recording: drag across the video to crop, across the filmstrip to trim, Return copies a
 //! high-quality MP4 to the clipboard. The first run walks through permissions as Hex's does.
 
-mod capture;
-mod export;
-mod gif;
-mod home;
-mod hotkey;
-mod menubar;
-mod permissions;
-mod picker;
-mod pipeline;
-mod render;
-mod review;
-mod settings;
-mod sound;
-mod thumbs;
-mod track;
-mod ui;
-mod updater;
-mod view;
-mod windows;
-mod zoom;
+// A tray app on Windows: no console window (stderr still reaches a redirect from a script).
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
-use review::Review;
-use rune::tok::type_;
-use capture::Target;
+// The macOS app. Modules without a gate are shared with the Windows port below; what only
+// the review and home windows use of them is dead code there until those come.
+#[cfg(target_os = "macos")] mod capture;
+mod export;
+#[cfg(target_os = "macos")] mod gif;
+#[cfg(target_os = "macos")] mod home;
+#[cfg_attr(windows, allow(dead_code))] mod hotkey;
+#[cfg(target_os = "macos")] mod menubar;
+#[cfg(target_os = "macos")] mod permissions;
+#[cfg(target_os = "macos")] mod picker;
+#[cfg(target_os = "macos")] mod pipeline;
+#[cfg_attr(windows, allow(dead_code))] mod render;
+#[cfg(target_os = "macos")] mod review;
+#[cfg_attr(windows, allow(dead_code))] mod settings;
+#[cfg(target_os = "macos")] mod sound;
+#[cfg(target_os = "macos")] mod thumbs;
+#[cfg_attr(windows, allow(dead_code))] mod track;
+#[cfg(target_os = "macos")] mod ui;
+#[cfg(target_os = "macos")] mod updater;
+mod view;
+#[cfg_attr(windows, allow(dead_code))] mod windows;
+mod zoom;
+// The Windows port (src/app_windows.rs): the same hotkey, the screen through
+// Windows.Graphics.Capture, and the export on the shared renderer straight after the stop; no
+// review window yet.
+#[cfg(windows)] mod app_windows;
+#[cfg(windows)] mod capture_windows;
+#[cfg(windows)] mod hotkey_windows;
+#[cfg(windows)] mod pipeline_windows;
+#[cfg(windows)] mod track_windows;
+
+#[cfg(target_os = "macos")] use review::Review;
+#[cfg(target_os = "macos")] use rune::tok::type_;
+#[cfg(target_os = "macos")] use capture::Target;
+#[cfg(target_os = "macos")]
 use rune::{
     Align, App, AppHandle, AppSpec, ClipboardContent, Color, Cx, DisplayTarget, El, Image, ImageCache, KeyEvent, KeyPolicy,
     NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel, OverlayOptions, OverlayPlacement, OverlaySpec, ScreenEdge, Tx,
     Waker, el, row, text,
 };
-use settings::{Settings, Setup};
+#[cfg(target_os = "macos")] use settings::{Settings, Setup};
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
-use ui::{RED, hex, ink};
+#[cfg(target_os = "macos")] use std::sync::mpsc;
+#[cfg(target_os = "macos")] use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")] use ui::{RED, hex, ink};
 
 /// `CLIP_TRACE=1` prints how long each step of a take takes, measured from the stop.
+#[cfg(target_os = "macos")]
 fn trace(what: &str) {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
@@ -49,22 +64,30 @@ fn trace(what: &str) {
 }
 
 pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    PathBuf::from(std::env::var(var).unwrap_or_else(|_| if cfg!(windows) { "C:\\".into() } else { "/tmp".into() }))
 }
 
+/// Exports: ~/Movies/Clip on macOS, Videos\Clip on Windows.
 fn clips_dir() -> PathBuf {
-    home().join("Movies/Clip")
+    home().join(if cfg!(windows) { "Videos\\Clip" } else { "Movies/Clip" })
 }
 
+/// Raw recordings and their tracks: Caches on macOS, %LOCALAPPDATA%\Clip on Windows.
 fn raw_dir() -> PathBuf {
+    if cfg!(windows) {
+        return std::env::var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|_| home().join("AppData\\Local")).join("Clip\\Raw");
+    }
     home().join("Library/Caches/Clip")
 }
 
 pub fn reveal_clips() {
     let _ = std::fs::create_dir_all(clips_dir());
-    let _ = std::process::Command::new("/usr/bin/open").arg(clips_dir()).spawn();
+    let opener = if cfg!(windows) { "explorer" } else { "/usr/bin/open" };
+    let _ = std::process::Command::new(opener).arg(clips_dir()).spawn();
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, PartialEq)]
 pub enum Phase {
     Idle,
@@ -78,6 +101,7 @@ pub enum Phase {
     Copied(PathBuf),
 }
 
+#[cfg(target_os = "macos")]
 pub struct Recent {
     pub path: PathBuf,
     pub image: Option<Image>,
@@ -85,11 +109,13 @@ pub struct Recent {
     pub bytes: u64,
 }
 
+#[cfg(target_os = "macos")]
 enum Cmd {
     Start(Target, capture::Options),
     Stop,
 }
 
+#[cfg(target_os = "macos")]
 pub struct Clip {
     pub phase: Phase,
     pub settings: Settings,
@@ -121,17 +147,22 @@ pub struct Clip {
     error: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 struct Hud {
     since: Option<Instant>,
     key_name: &'static str,
     app: Option<AppHandle<Clip>>,
 }
 
+#[cfg(target_os = "macos")]
 const TOAST: Duration = Duration::from_millis(1600);
+#[cfg(target_os = "macos")]
 const RETAKE_GUARD: Duration = Duration::from_millis(900);
+#[cfg(target_os = "macos")]
 /// Raw recordings kept in Caches; older ones are deleted when a new one starts.
 const KEEP_RAW: usize = 4;
 
+#[cfg(target_os = "macos")]
 impl Clip {
     pub fn screen_access(&self) -> permissions::Access {
         permissions::screen_access(self.asked_screen, self.waker.clone())
@@ -408,6 +439,7 @@ impl Clip {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// Keeps the newest few raw recordings and deletes the rest.
 fn prune_raw() {
     let mut raws: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(raw_dir()).into_iter().flatten().flatten()
@@ -417,6 +449,7 @@ fn prune_raw() {
     for (path, _) in raws.into_iter().skip(KEEP_RAW) { let _ = std::fs::remove_file(path); }
 }
 
+#[cfg(target_os = "macos")]
 /// Runs the recorder on its own thread: starting and stopping wait on ScreenCaptureKit.
 fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
@@ -476,6 +509,7 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
     tx
 }
 
+#[cfg(target_os = "macos")]
 fn hud_view(h: &Hud, _: &mut Cx<Hud>) -> El {
     let secs = h.since.map_or(0.0, |s| s.elapsed().as_secs_f64());
     let label = format!("{}:{:02}", (secs / 60.0) as u32, secs as u32 % 60);
@@ -488,6 +522,7 @@ fn hud_view(h: &Hud, _: &mut Cx<Hud>) -> El {
             .on_press(|h: &mut Hud| if let Some(app) = &h.app { app.update(|s, _| s.stop()) }))
 }
 
+#[cfg(target_os = "macos")]
 fn on_key(s: &mut Clip, ev: &KeyEvent, tx: &mut Tx) -> bool {
     use rune::Key;
     if ev.key == Key::Command('q') {
@@ -502,6 +537,7 @@ fn on_key(s: &mut Clip, ev: &KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
+#[cfg(target_os = "macos")]
 fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
     let mut changed = false;
     if s.phase == Phase::Review && !s.traced_frame && s.review.as_ref().is_some_and(|r| r.player.natural_size().is_some()) {
@@ -531,6 +567,7 @@ fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
     changed
 }
 
+#[cfg(target_os = "macos")]
 fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     let body = match &s.review {
         Some(r) => review::view(s, r, cx),
@@ -545,6 +582,7 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn main() {
     if std::env::args().any(|a| a == "--screen-check") { permissions::screen_check_main() }
     if std::env::args().nth(1).as_deref() == Some("--render-frame") { render::frame_cli(&std::env::args().skip(2).collect::<Vec<_>>()) }
@@ -633,4 +671,9 @@ fn main() {
     }
     app.run();
     updater::install_on_quit();
+}
+
+#[cfg(windows)]
+fn main() {
+    app_windows::main()
 }

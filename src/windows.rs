@@ -3,16 +3,21 @@
 //! it about six times a second to log where each window was and which was in front, so the
 //! review can turn any window, or whichever was in focus, into the shot afterwards.
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const AnyObject;
 }
 
 /// A normal window, front to back, in global points (top-left origin).
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug)]
 pub struct Info {
     pub id: u32,
@@ -24,6 +29,7 @@ pub struct Info {
 
 /// Normal (layer 0) windows on screen, front to back, at least `min` points on each side,
 /// leaving out Clip's own.
+#[cfg(target_os = "macos")]
 pub fn on_screen(min: f64) -> Vec<Info> {
     const ON_SCREEN: u32 = 1 << 0;
     const NO_DESKTOP: u32 = 1 << 4;
@@ -53,6 +59,7 @@ pub fn on_screen(min: f64) -> Vec<Info> {
 }
 
 /// The app bundle a process runs from, for its icon.
+#[cfg(target_os = "macos")]
 pub fn app_path(pid: i32) -> Option<std::path::PathBuf> {
     use objc2::{class, msg_send};
     unsafe {
@@ -92,12 +99,15 @@ pub struct Windows {
 }
 
 /// Smallest window worth following, in points.
+#[cfg(target_os = "macos")]
 const MIN_SIDE: f64 = 120.0;
 /// A rect change smaller than this (a fraction of the area) isn't logged.
+#[cfg(target_os = "macos")]
 const JITTER: f64 = 0.002;
 
 impl Windows {
-    /// Logs the windows over `frame` (global points) at `t`.
+    /// Logs the windows over `frame` (global points) at `t`. Windows doesn't log windows yet.
+    #[cfg(target_os = "macos")]
     pub fn sample(&mut self, frame: [f64; 4], t: f64) {
         let [fx, fy, fw, fh] = frame;
         let mut front = None;

@@ -8,15 +8,19 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1; // kCGEventSourceStateHIDSystemState
+#[cfg(target_os = "macos")]
 const KEY_DOWN: u32 = 10; // kCGEventKeyDown
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGEventSourceFlagsState(state: i32) -> u64;
     fn CGEventSourceCounterForEventType(state: i32, kind: u32) -> u32;
 }
 
-/// Which key: a device bit (one side) or either side's, and its generic modifier flag.
+/// Which key: a device bit (one side) or either side's, and its generic modifier flag. The
+/// bits are CGEventFlags'; src/hotkey_windows.rs lays its keyboard state out the same way.
 #[derive(Clone, Copy, Debug)]
 pub struct Trigger {
     pub name: &'static str,
@@ -24,10 +28,10 @@ pub struct Trigger {
     generic: u64,
 }
 
-const CONTROL: u64 = 0x40000;
-const SHIFT: u64 = 0x20000;
-const OPTION: u64 = 0x80000;
-const COMMAND: u64 = 0x100000;
+pub const CONTROL: u64 = 0x40000;
+pub const SHIFT: u64 = 0x20000;
+pub const OPTION: u64 = 0x80000;
+pub const COMMAND: u64 = 0x100000;
 const ALL: u64 = CONTROL | SHIFT | OPTION | COMMAND;
 
 impl Trigger {
@@ -108,6 +112,7 @@ impl Taps {
 }
 
 /// Calls `send` with each event, on its own thread, for the life of the process.
+#[cfg(target_os = "macos")]
 pub fn watch(trigger: Trigger, mut send: impl FnMut(Event) + Send + 'static) {
     std::thread::Builder::new().name("clip-hotkey".into()).spawn(move || {
         let mut taps = Taps::new(trigger);

@@ -141,7 +141,11 @@ impl Default for Settings {
     }
 }
 
+/// Application Support on macOS, %APPDATA%\Clip on Windows.
 fn path() -> PathBuf {
+    if cfg!(windows) {
+        return std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| crate::home().join("AppData\\Roaming")).join("Clip\\settings.json");
+    }
     crate::home().join("Library/Application Support/Clip/settings.json")
 }
 
