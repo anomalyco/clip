@@ -56,9 +56,9 @@ pub fn megabytes(bytes: u64) -> String {
 
 /// Windows and Linux: Clip's title bar, drawn by Clip in each platform's own manner, as
 /// macOS draws Clip's content under its traffic lights. A strip across the top band moves the
-/// window (a double press maximizes), with the window buttons at the right: Windows 11's flat
-/// caption buttons (close turns red under the pointer), GNOME's round header-bar buttons on
-/// Linux. The symbols are drawn from lines, so no font decides how they look.
+/// window (a double press maximizes), with the window buttons at the right: soft rounded
+/// buttons on Windows (a pill under the pointer, red for close), GNOME's round header-bar
+/// buttons on Linux. The symbols are drawn from lines, so no font decides how they look.
 #[cfg(not(target_os = "macos"))]
 pub fn titlebar() -> El {
     row().key("titlebar").absolute(0.0, 0.0).w_full().h(TITLEBAR).justify_end().center_y().gap(BUTTON_GAP).pr(BUTTON_INSET)
@@ -72,21 +72,27 @@ pub fn titlebar() -> El {
 #[cfg(not(target_os = "macos"))]
 const TITLEBAR: f32 = 36.0;
 
-/// Windows 11: caption buttons 46 wide, the bar's full height, flush with the corner.
+/// Windows: rounded buttons a little apart, inset from the corner.
 #[cfg(windows)]
-const BUTTON_GAP: f32 = 0.0;
+const BUTTON_GAP: f32 = 4.0;
 #[cfg(windows)]
-const BUTTON_INSET: f32 = 0.0;
+const BUTTON_INSET: f32 = 8.0;
 /// GNOME: round buttons with a little space between them and the edge.
 #[cfg(target_os = "linux")]
 const BUTTON_GAP: f32 = 8.0;
 #[cfg(target_os = "linux")]
 const BUTTON_INSET: f32 = 8.0;
 
-/// A line `w` long and one pixel thick, turned `angle` radians about its middle.
+/// The symbols' line weight: a touch heavier on Windows, where they sit on no fill.
+#[cfg(windows)]
+const STROKE: f32 = 1.5;
+#[cfg(target_os = "linux")]
+const STROKE: f32 = 1.0;
+
+/// A line `w` long, turned `angle` radians about its middle.
 #[cfg(not(target_os = "macos"))]
 fn stroke(w: f32, angle: f32) -> El {
-    el().absolute(0.0, 0.0).w_full().h_full().center().child(el().w(w).h(1.0).fill(ink(0.9)).rotate(angle))
+    el().absolute(0.0, 0.0).w_full().h_full().center().child(el().w(w).h(STROKE).radius(STROKE / 2.0).fill(ink(0.85)).rotate(angle))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -96,28 +102,30 @@ fn glyph() -> El {
 
 #[cfg(not(target_os = "macos"))]
 fn minimize_glyph() -> El {
-    // Windows centres it; GNOME sets it low, as its symbolic icon does.
-    let y = if cfg!(windows) { 5.5 } else { 8.5 };
-    glyph().child(el().absolute(1.0, y).w(10.0).h(1.0).fill(ink(0.9)))
+    // Centred on Windows; GNOME sets it low, as its symbolic icon does.
+    let (y, w) = if cfg!(windows) { (5.25, 9.0) } else { (8.5, 10.0) };
+    glyph().child(el().absolute((12.0 - w) / 2.0, y).w(w).h(STROKE).radius(STROKE / 2.0).fill(ink(0.85)))
 }
 
 #[cfg(not(target_os = "macos"))]
 fn maximize_glyph() -> El {
-    let r = if cfg!(windows) { 1.0 } else { 1.5 };
-    glyph().child(el().absolute(1.5, 1.5).size(9.0, 9.0).radius(r).border(1.0, ink(0.9)))
+    let (side, r) = if cfg!(windows) { (8.5, 2.5) } else { (9.0, 1.5) };
+    let at = (12.0 - side) / 2.0;
+    glyph().child(el().absolute(at, at).size(side, side).radius(r).border(STROKE, ink(0.85)))
 }
 
 #[cfg(not(target_os = "macos"))]
 fn close_glyph() -> El {
     let quarter = std::f32::consts::FRAC_PI_4;
-    glyph().child(stroke(13.0, quarter)).child(stroke(13.0, -quarter))
+    let w = if cfg!(windows) { 11.0 } else { 13.0 };
+    glyph().child(stroke(w, quarter)).child(stroke(w, -quarter))
 }
 
 #[cfg(windows)]
 fn window_button(key: &'static str, glyph: El, close: bool, act: fn(&mut rune::Tx)) -> El {
-    el().key(key).w(46.0).h(TITLEBAR).center().child(glyph)
-        .hover(if close { hex("#c42b1c") } else { ink(0.08) })
-        .press(if close { hex("#c42b1c").alpha(0.8) } else { ink(0.05) })
+    el().key(key).size(30.0, 26.0).radius(7.0).center().child(glyph)
+        .hover(if close { hex("#e5484d").alpha(0.9) } else { ink(0.08) })
+        .press(if close { hex("#e5484d").alpha(0.7) } else { ink(0.05) })
         .on_press_tx(move |_: &mut crate::Clip, tx: &mut rune::Tx| act(tx))
 }
 
