@@ -196,6 +196,7 @@ impl Clip {
         }
         self.review = Some(review);
         self.traced_frame = false;
+        self.error = None;
         self.phase = Phase::Review;
         review::load_film(self);
         tx.resize_window_instant(review::SIZE);
@@ -480,6 +481,13 @@ fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
     if s.phase == Phase::Review && !s.traced_frame && s.review.as_ref().is_some_and(|r| r.player.natural_size().is_some()) {
         s.traced_frame = true;
         trace("video loaded");
+    }
+    // The player's thread ending on an error: say so once, and stop the clock it left running.
+    if let Some(r) = &s.review && !r.failed.get() && let rune::PlayerState::Failed(e) = r.player.state() {
+        r.failed.set(true);
+        r.player.pause();
+        s.error = Some(format!("Can't play the recording: {e}"));
+        changed = true;
     }
     // Playback moves only live values: keep polling each frame, but don't rebuild the view.
     if s.review.as_ref().is_some_and(|r| r.follow(&s.settings)) {

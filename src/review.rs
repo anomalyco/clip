@@ -119,13 +119,15 @@ pub struct Review {
     preview: Cell<Option<Preview>>,
     rate: Cell<f32>,
     derived: RefCell<Option<Derived>>,
+    /// The player's failure has been reported (`Clip::error`), once.
+    pub failed: Cell<bool>,
 }
 
 impl Review {
     pub fn new(path: PathBuf, waker: Option<&rune::Waker>, has_audio: bool) -> Self {
-        // Frames come through Pixels, which wake the window themselves.
-        let _ = waker;
-        let player = Playback::file(&path);
+        // Frames come through Pixels, which wake the window themselves; the waker is for the
+        // player ending on an error.
+        let player = Playback::file(&path, waker.cloned());
         player.set_muted(!has_audio);
         player.set_looping(true);
         player.play();
@@ -135,6 +137,7 @@ impl Review {
             shot: Source::Desktop, icons: Vec::new(),
             playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), video_rect: Live::new([0.0; 4]), frame_radius: Cell::new(0.0),
             track_w: Cell::new(SIZE.0 - 40.0), preview: Cell::new(None), rate: Cell::new(1.0), derived: RefCell::new(None),
+            failed: Cell::new(false),
         }
     }
 
