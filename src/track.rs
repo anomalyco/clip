@@ -4,9 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
@@ -102,13 +102,13 @@ impl Track {
 }
 
 /// Watches until `stop` is set, then returns what it saw (src/track_windows.rs on Windows).
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 pub struct Tracker {
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<Track>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 impl Tracker {
     /// `windows`: also log the windows over `frame` (for a whole-screen recording).
     #[cfg(target_os = "macos")]
@@ -164,13 +164,13 @@ impl Tracker {
 
 /// Darkest a pixel outside a window's corner can be and still count as empty (the encoder
 /// leaves the black a little noisy).
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 const EMPTY: u8 = 12;
 
 /// A window recording's corner radius in pixels: the longest run of black along an edge from
 /// any of a frame's four corners, which is how far the window's rounded corner leaves the
 /// edge empty. Capped at a fifth of the short side, in case the window itself is black there.
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 fn window_corner(raw: &Path) -> f64 {
     let Some(f) = crate::thumbs::frames(raw, &[0.5], (16384.0, 16384.0)).pop().flatten() else { return 0.0 };
     let (w, h) = (f.w as usize, f.h as usize);

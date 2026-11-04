@@ -17,7 +17,7 @@ unsafe extern "C" {
 }
 
 /// A normal window, front to back, in global points (top-left origin).
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 #[derive(Clone, Debug)]
 pub struct Info {
     pub id: u32,
@@ -110,15 +110,15 @@ pub struct Windows {
 }
 
 /// Smallest window worth following, in points.
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 const MIN_SIDE: f64 = 120.0;
 /// A rect change smaller than this (a fraction of the area) isn't logged.
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 const JITTER: f64 = 0.002;
 
 impl Windows {
     /// Logs the windows over `frame` (global points) at `t`. Windows doesn't log windows yet.
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     pub fn sample(&mut self, frame: [f64; 4], t: f64) {
         let [fx, fy, fw, fh] = frame;
         let mut front = None;
