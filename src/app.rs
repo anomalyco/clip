@@ -512,8 +512,11 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     // Windows and Linux: Clip's own title bar over the band the views leave for macOS's.
     #[cfg(not(target_os = "macos"))]
     let body = el().w_full().h_full().child(body.w_full().h_full()).child(ui::titlebar());
+    // The body gives the error row its height even when its content fills the window (the
+    // home window's does exactly): without the floor it keeps its content's height and the
+    // row lands below the window's edge, unseen.
     match &s.error {
-        Some(e) => rune::col().w_full().h_full().child(body.grow(1.0))
+        Some(e) => rune::col().w_full().h_full().child(body.grow(1.0).min_h(0.0))
             .child(row().key("error").w_full().h(32.0).px(16.0).center_y().fill(hex("#3a1416"))
                 .child(text(e.clone()).font(type_::BODY).color(Color::WHITE))
                 .on_press(|s: &mut Clip| s.error = None)),
