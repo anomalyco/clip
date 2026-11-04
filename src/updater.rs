@@ -97,6 +97,7 @@ impl Shared {
     }
 
     fn set(&self, status: Status) {
+        eprintln!("clip: update: {status:?}");
         self.lock().status = Some(status.clone());
         (self.on_change)(status);
     }
@@ -299,9 +300,14 @@ fn download(url: &str, user_agent: &str, target: &protocol::Target) -> Result<Pa
         .map_err(|e| format!("couldn't download the update ({e})"))?;
     if response.status().as_u16() != 200 { return Err(format!("the update download failed with HTTP {}", response.status().as_u16())) }
     let mut out = fs::File::create(&partial).map_err(|e| e.to_string())?;
-    std::io::copy(&mut response.body_mut().with_config().limit(target.size).reader(), &mut out)
-        .map_err(|e| format!("the update download failed ({e})"))?;
+    // One byte over the size: ureq's limit fails a body that reaches it, and a longer one
+    // fails the size check below.
+    let copied = std::io::copy(&mut response.body_mut().with_config().limit(target.size + 1).reader(), &mut out);
     drop(out);
+    if let Err(e) = copied {
+        let _ = fs::remove_file(&partial);
+        return Err(format!("the update download failed ({e})"));
+    }
     if let Err(e) = verify(&partial) {
         let _ = fs::remove_file(&partial);
         return Err(e);
