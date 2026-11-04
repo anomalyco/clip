@@ -3,11 +3,15 @@
 //! it about six times a second to log where each window was and which was in front, so the
 //! review can turn any window, or whichever was in focus, into the shot afterwards.
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2::runtime::AnyObject;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> *const AnyObject;
 }
@@ -24,6 +28,7 @@ pub struct Info {
 
 /// Normal (layer 0) windows on screen, front to back, at least `min` points on each side,
 /// leaving out Clip's own.
+#[cfg(target_os = "macos")]
 pub fn on_screen(min: f64) -> Vec<Info> {
     const ON_SCREEN: u32 = 1 << 0;
     const NO_DESKTOP: u32 = 1 << 4;
@@ -52,7 +57,19 @@ pub fn on_screen(min: f64) -> Vec<Info> {
     }
 }
 
+/// No window list on Linux yet: Wayland has none to give, and X11's isn't read.
+#[cfg(target_os = "linux")]
+pub fn on_screen(_min: f64) -> Vec<Info> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+pub fn app_path(_pid: i32) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// The app bundle a process runs from, for its icon.
+#[cfg(target_os = "macos")]
 pub fn app_path(pid: i32) -> Option<std::path::PathBuf> {
     use objc2::{class, msg_send};
     unsafe {

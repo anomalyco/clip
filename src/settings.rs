@@ -141,8 +141,20 @@ impl Default for Settings {
     }
 }
 
+/// Where Clip keeps what it remembers: Application Support on macOS, the XDG config
+/// directory on Linux.
+pub fn dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    { crate::home().join("Library/Application Support/Clip") }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .unwrap_or_else(|| crate::home().join(".config")).join("clip")
+    }
+}
+
 fn path() -> PathBuf {
-    crate::home().join("Library/Application Support/Clip/settings.json")
+    dir().join("settings.json")
 }
 
 const VERSION: u32 = 1;

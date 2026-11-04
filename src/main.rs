@@ -1,23 +1,52 @@
 //! Clip: double-tap ⌃ to record the screen, tap ⌃ once to stop. The review window opens with
 //! the recording: drag across the video to crop, across the filmstrip to trim, Return copies a
 //! high-quality MP4 to the clipboard. The first run walks through permissions as Hex's does.
+//!
+//! On Linux (a first version) there's no review yet: a take is exported with the settings as
+//! soon as it stops, into ~/Videos/Clip. The platform modules (capture, pipeline, thumbs, gif,
+//! menubar, permissions) have a Linux file each with the same names and signatures.
 
+#[cfg(target_os = "macos")]
+mod capture;
+#[cfg(target_os = "linux")]
+#[path = "capture_linux.rs"]
 mod capture;
 mod export;
+#[cfg(target_os = "macos")]
+mod gif;
+#[cfg(target_os = "linux")]
+#[path = "gif_linux.rs"]
 mod gif;
 mod home;
 mod hotkey;
+#[cfg(target_os = "macos")]
 mod menubar;
+#[cfg(target_os = "linux")]
+#[path = "menubar_linux.rs"]
+mod menubar;
+#[cfg(target_os = "macos")]
+mod permissions;
+#[cfg(target_os = "linux")]
+#[path = "permissions_linux.rs"]
 mod permissions;
 mod picker;
+#[cfg(target_os = "macos")]
+mod pipeline;
+#[cfg(target_os = "linux")]
+#[path = "pipeline_linux.rs"]
 mod pipeline;
 mod render;
 mod review;
 mod settings;
 mod sound;
+#[cfg(target_os = "macos")]
+mod thumbs;
+#[cfg(target_os = "linux")]
+#[path = "thumbs_linux.rs"]
 mod thumbs;
 mod track;
 mod ui;
+#[cfg(target_os = "macos")]
 mod updater;
 mod view;
 mod windows;
@@ -53,16 +82,26 @@ pub fn home() -> PathBuf {
 }
 
 fn clips_dir() -> PathBuf {
-    home().join("Movies/Clip")
+    #[cfg(target_os = "macos")]
+    { home().join("Movies/Clip") }
+    #[cfg(not(target_os = "macos"))]
+    { home().join("Videos/Clip") }
 }
 
 fn raw_dir() -> PathBuf {
-    home().join("Library/Caches/Clip")
+    #[cfg(target_os = "macos")]
+    { home().join("Library/Caches/Clip") }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home().join(".cache")).join("clip")
+    }
 }
 
 pub fn reveal_clips() {
     let _ = std::fs::create_dir_all(clips_dir());
-    let _ = std::process::Command::new("/usr/bin/open").arg(clips_dir()).spawn();
+    let opener = if cfg!(target_os = "macos") { "/usr/bin/open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(clips_dir()).spawn();
 }
 
 #[derive(Clone, PartialEq)]
@@ -165,10 +204,12 @@ impl Clip {
         }
     }
 
-    /// The double tap: the picker, or straight to recording the screen under the pointer.
+    /// The double tap: the picker, or straight to recording the screen under the pointer. On
+    /// Linux there's no picker yet (Wayland's portal has its own; X11 lists no windows), so
+    /// it's always the screen.
     fn begin(&mut self, tx: &mut Tx) {
         let display = capture::pointer_display();
-        if !self.settings.pick_area {
+        if !self.settings.pick_area || cfg!(target_os = "linux") {
             self.start(Target::Display(display), tx);
             return;
         }
@@ -217,6 +258,7 @@ impl Clip {
         let _ = self.worker.send(Cmd::Stop);
     }
 
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     fn load(&mut self, path: PathBuf, has_audio: bool, tx: &mut Tx) {
         trace("file written, opening review");
         let mut review = Review::new(path, self.waker.as_ref(), has_audio);
@@ -260,6 +302,8 @@ impl Clip {
     }
 
     pub fn set_setup(&mut self, setup: Setup, tx: &mut Tx) {
+        // Linux asks for nothing up front: the portal asks on the first take, if at all.
+        let setup = if cfg!(target_os = "linux") && setup == Setup::Permissions { Setup::TryIt } else { setup };
         self.settings.setup = setup;
         self.settings.onboarded |= setup == Setup::Done;
         self.settings.save();
@@ -344,6 +388,20 @@ impl Clip {
         let Some(plan) = r.plan(&self.settings, gif) else { return };
         r.player.pause();
         let source = r.source.clone();
+        self.export_plan(source, plan);
+    }
+
+    /// A take just stopped, with no review to open (Linux): export it as the settings say.
+    #[cfg(target_os = "linux")]
+    pub fn export_raw(&mut self, path: PathBuf) {
+        let Some(probe) = thumbs::probe(&path) else { self.error = Some("couldn't read the recording".into()); return };
+        let track = track::Track::load(&path);
+        let plan = export::plan_default(&track, &self.settings, (probe.w, probe.h), probe.duration, false);
+        self.export_plan(path, plan);
+    }
+
+    /// Exports `plan` of `source` on a thread, copies the file and shows Copied for a moment.
+    fn export_plan(&mut self, source: PathBuf, plan: export::Plan) {
         self.phase = Phase::Exporting(0.0);
         let (me, sounds) = (self.me.clone(), self.settings.sounds);
         std::thread::spawn(move || {
@@ -360,6 +418,8 @@ impl Clip {
                 Ok(path) => {
                     tx.copy_rich(ClipboardContent::default().with_files([path.clone()]));
                     if sounds { sound::play(sound::Cue::Copied) }
+                    #[cfg(target_os = "linux")]
+                    notify(&format!("Saved {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
                     s.phase = Phase::Copied(path);
                     let me = s.me.clone();
                     std::thread::spawn(move || {
@@ -406,6 +466,14 @@ impl Clip {
             });
         });
     }
+}
+
+/// A desktop notification, through notify-send when it's there: on Linux the export runs
+/// with no window open, so this is how a finished clip is announced.
+#[cfg(target_os = "linux")]
+fn notify(body: &str) {
+    let _ = std::process::Command::new("notify-send").args(["--app-name=Clip", "Clip", body])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 /// Keeps the newest few raw recordings and deletes the rest.
@@ -464,7 +532,10 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     match r.stop() {
                         Ok(path) => {
                             tracker.finish(&path, window);
-                            me.update(move |s, tx| s.load(path, audio, tx))
+                            #[cfg(target_os = "macos")]
+                            me.update(move |s, tx| s.load(path, audio, tx));
+                            #[cfg(target_os = "linux")]
+                            { let _ = audio; me.update(move |s, _| s.export_raw(path)) }
                         }
                         Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
                     }
@@ -545,9 +616,37 @@ fn view(s: &Clip, cx: &mut Cx<Clip>) -> El {
     }
 }
 
+/// `clip --export <recording> [dir]`: exports a recording with the saved settings, as Linux
+/// does after every take, into `dir` (the clips folder by default), with no window. Exits.
+fn export_cli(args: &[String]) -> ! {
+    let run = || -> Result<PathBuf, String> {
+        let [raw, rest @ ..] = args else { return Err("usage: --export <recording> [dir]".into()) };
+        let raw = std::path::Path::new(raw);
+        let dir = rest.first().map_or_else(clips_dir, PathBuf::from);
+        let settings = Settings::load();
+        let track = track::Track::load(raw);
+        let (video, duration) = {
+            #[cfg(target_os = "linux")]
+            { let p = thumbs::probe(raw).ok_or("couldn't read the recording")?; ((p.w, p.h), p.duration) }
+            #[cfg(not(target_os = "linux"))]
+            { let f = thumbs::frame_at(raw, 0.0).ok_or("couldn't decode the recording")?; ((f.w, f.h), thumbs::duration(raw).ok_or("couldn't read the recording")?) }
+        };
+        let plan = export::plan_default(&track, &settings, video, duration, false);
+        let started = Instant::now();
+        let out = export::run(raw, &plan, &dir, |f| eprint!("\rclip: exporting {:3.0}%", f * 100.0))?;
+        eprintln!("\rclip: exported {} in {:.1} s", out.display(), started.elapsed().as_secs_f64());
+        Ok(out)
+    };
+    match run() {
+        Ok(out) => { println!("{}", out.display()); std::process::exit(0) }
+        Err(e) => { eprintln!("clip: {e}"); std::process::exit(1) }
+    }
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--screen-check") { permissions::screen_check_main() }
     if std::env::args().nth(1).as_deref() == Some("--render-frame") { render::frame_cli(&std::env::args().skip(2).collect::<Vec<_>>()) }
+    if std::env::args().nth(1).as_deref() == Some("--export") { export_cli(&std::env::args().skip(2).collect::<Vec<_>>()) }
     let trigger = hotkey::Trigger::from_env();
     let settings = Settings::load();
     let spec = AppSpec {
@@ -609,10 +708,17 @@ fn main() {
         key_name: trigger.name, stopped_at: None, started_at: None, traced_frame: false, error: None,
     });
     opener.update(|s, _| menubar::install(s.me.clone(), s.key_name));
-    let me = opener.clone();
-    updater::start(move |status| me.update(move |_, _| menubar::set_update(&status)));
+    #[cfg(target_os = "macos")]
+    {
+        let me = opener.clone();
+        updater::start(move |status| me.update(move |_, _| menubar::set_update(&status)));
+    }
     match open {
+        #[cfg(target_os = "macos")]
         Some(path) => opener.update(move |s, tx| s.load(path, true, tx)),
+        // No review on Linux: an opened recording is exported as a stopped take is.
+        #[cfg(target_os = "linux")]
+        Some(path) => opener.update(move |s, _| s.export_raw(path)),
         // The first run opens the window; after it, Clip starts silently in the menu bar and
         // waits for ⌃ ⌃. A Clip that can't record (a new build's identity, or access taken
         // away) opens on the permissions step instead of failing at the first double tap.
@@ -632,5 +738,6 @@ fn main() {
         }
     }
     app.run();
+    #[cfg(target_os = "macos")]
     updater::install_on_quit();
 }

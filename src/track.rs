@@ -6,21 +6,36 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[path = "track_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::pointer;
+
+#[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1;
+#[cfg(target_os = "macos")]
 const LEFT_DOWN: u32 = 1;
+#[cfg(target_os = "macos")]
 const MOUSE_MOVED: u32 = 5;
+#[cfg(target_os = "macos")]
 const LEFT_DRAGGED: u32 = 6;
+#[cfg(target_os = "macos")]
 const KEY_DOWN: u32 = 10;
+#[cfg(target_os = "macos")]
 const SCROLL: u32 = 22;
 /// Busy moments closer than this merge; a gap at least this long is idle.
 pub const IDLE_GAP: f64 = 1.5;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CGPoint { x: f64, y: f64 }
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGEventSourceCounterForEventType(state: i32, kind: u32) -> u32;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
@@ -28,6 +43,7 @@ unsafe extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
+#[cfg(target_os = "macos")]
 pub fn pointer() -> (f64, f64) {
     unsafe {
         let e = CGEventCreate(std::ptr::null());
@@ -91,6 +107,7 @@ pub struct Tracker {
 
 impl Tracker {
     /// `windows`: also log the windows over `frame` (for a whole-screen recording).
+    #[cfg(target_os = "macos")]
     pub fn start(frame: [f64; 4], t0: Instant, windows: bool) -> Tracker {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();

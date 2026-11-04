@@ -8,9 +8,18 @@
 
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+#[path = "hotkey_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::watch;
+
+#[cfg(target_os = "macos")]
 const HID_STATE: i32 = 1; // kCGEventSourceStateHIDSystemState
+#[cfg(target_os = "macos")]
 const KEY_DOWN: u32 = 10; // kCGEventKeyDown
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn CGEventSourceFlagsState(state: i32) -> u64;
     fn CGEventSourceCounterForEventType(state: i32, kind: u32) -> u32;
@@ -108,6 +117,7 @@ impl Taps {
 }
 
 /// Calls `send` with each event, on its own thread, for the life of the process.
+#[cfg(target_os = "macos")]
 pub fn watch(trigger: Trigger, mut send: impl FnMut(Event) + Send + 'static) {
     std::thread::Builder::new().name("clip-hotkey".into()).spawn(move || {
         let mut taps = Taps::new(trigger);
