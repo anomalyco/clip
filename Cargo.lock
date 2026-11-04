@@ -289,6 +289,7 @@ name = "clip"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "cc",
  "dispatch2",
  "objc2 0.6.5",
  "objc2-av-foundation",

@@ -7,6 +7,7 @@ mod export;
 mod gif;
 mod home;
 mod hotkey;
+mod menubar;
 mod permissions;
 mod picker;
 mod review;
@@ -212,6 +213,7 @@ impl Clip {
     pub fn stop(&mut self) {
         if self.phase != Phase::Recording { return }
         self.phase = Phase::Finishing;
+        menubar::set_recording(false);
         trace("stop");
         self.stopped_at = Some(Instant::now());
         self.hud.hide();
@@ -231,8 +233,17 @@ impl Clip {
         self.me.focus();
     }
 
+    /// The menu bar's Record: the same as ⌃ ⌃, or Stop while recording.
+    pub fn record_from_menu(&mut self, tx: &mut Tx) {
+        match self.phase {
+            Phase::Recording => self.stop(),
+            Phase::Idle | Phase::Review | Phase::Copied(_) => self.begin(tx),
+            _ => {}
+        }
+    }
+
     /// The home window or the first-run step setup is on.
-    fn show(&mut self, tx: &mut Tx) {
+    pub fn show(&mut self, tx: &mut Tx) {
         let size = if self.settings.setup == Setup::Done { home::HOME_SIZE } else { home::SETUP_SIZE };
         tx.resize_window_instant(size);
         tx.center_window();
@@ -278,7 +289,7 @@ impl Clip {
 
     pub fn ask_screen(&mut self) {
         self.asked_screen = true;
-        permissions::ask_screen();
+        permissions::ask_screen(self.me.clone());
     }
 
     pub fn ask_mic(&mut self) {
@@ -426,7 +437,10 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                             hud.set_display(DisplayTarget::UnderPointer);
                             hud.update(|h, _| h.since = Some(Instant::now()));
                             hud.show();
-                            me.update(|s, _| s.phase = Phase::Recording);
+                            me.update(|s, _| {
+                                s.phase = Phase::Recording;
+                                menubar::set_recording(true);
+                            });
                         }
                         Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
                     }
@@ -576,10 +590,18 @@ fn main() {
         asked_screen: false, asked_mic: false, key_down: false, login: None, mic_ok: false, screen_seen: permissions::Access::Off, recent: Vec::new(), toast: None,
         key_name: trigger.name, stopped_at: None, started_at: None, traced_frame: false, error: None,
     });
+    opener.update(|s, _| menubar::install(s.me.clone(), s.key_name));
     match open {
         Some(path) => opener.update(move |s, tx| s.load(path, true, tx)),
-        // The first run opens the window; after it, Clip starts silently and waits for ⌃ ⌃.
+        // The first run opens the window; after it, Clip starts silently in the menu bar and
+        // waits for ⌃ ⌃. A Clip that can't record (a new build's identity, or access taken
+        // away) opens on the permissions step instead of failing at the first double tap.
         None if first_run => opener.update(|s, tx| s.show(tx)),
+        None if !permissions::screen_usable() => opener.update(|s, tx| {
+            s.settings.setup = Setup::Permissions;
+            s.settings.save();
+            s.show(tx);
+        }),
         None => {}
     }
     app.run();

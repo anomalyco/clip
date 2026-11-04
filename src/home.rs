@@ -109,7 +109,7 @@ fn permissions_step(s: &Clip) -> El {
 fn try_step(s: &Clip) -> El {
     let body = col().gap(30.0).center()
         .child(keys_demo(s))
-        .child(heading("Your turn", "Double-tap ⌃ to start recording this screen, do anything, then tap ⌃ once to stop."));
+        .child(heading("Your turn", "Double-tap ⌃ to start recording, do anything, then tap ⌃ once to stop. Clip waits in the menu bar between takes."));
     let skip = Button::new("Skip").variant(ButtonVariant::GhostMuted).on_press_tx(|s: &mut Clip, tx: &mut Tx| s.set_setup(Setup::Done, tx)).build(kit());
     page(body, skip, Some(2))
 }

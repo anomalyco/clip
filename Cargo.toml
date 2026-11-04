@@ -18,6 +18,9 @@ objc2-core-foundation = "0.3.2"
 objc2-screen-capture-kit = "0.3.2"
 objc2-av-foundation = "0.3.2"
 
+[build-dependencies]
+cc = "1"
+
 [profile.dev.package."*"]
 opt-level = 2
 debug = false

@@ -1,5 +1,9 @@
 #!/bin/sh
-# Build target/Clip.app: release binary, an Info.plist for a menu-bar-less accessory app, ad-hoc signed.
+# Build target/Clip.app: release binary, icon, Info.plist for an accessory app.
+# Signed with the Developer ID when it's in the keychain (hardened runtime, so it can be
+# notarized, and a stable identity, so macOS keeps Clip's permissions across builds),
+# else ad hoc. CLIP_NOTARIZE=1 also notarizes and staples it (notarytool profile
+# CLIP_NOTARY_PROFILE, default isocast-notary).
 set -eu
 cd "$(dirname "$0")/.."
 cargo build --release
@@ -26,8 +30,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Clip</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>6</string>
-  <key>CFBundleShortVersionString</key><string>0.4.2</string>
+  <key>CFBundleVersion</key><string>7</string>
+  <key>CFBundleShortVersionString</key><string>0.5.0</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -37,5 +41,20 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - --identifier dev.vogel.clip "$app"
+identity="${CLIP_SIGN_IDENTITY:-Developer ID Application: Ryan Vogel (9G68SMNHEU)}"
+if security find-identity -v -p codesigning | grep -qF "$identity"; then
+  codesign --force --options runtime --timestamp --entitlements scripts/clip.entitlements --sign "$identity" "$app"
+else
+  echo "no $identity: signing ad hoc (permissions reset with every build)" >&2
+  codesign --force --sign - --identifier dev.vogel.clip "$app"
+fi
+codesign --verify --strict "$app"
+if [ "${CLIP_NOTARIZE:-0}" = 1 ]; then
+  zip=target/Clip-notarize.zip
+  rm -f "$zip"
+  ditto -c -k --keepParent "$app" "$zip"
+  xcrun notarytool submit "$zip" --keychain-profile "${CLIP_NOTARY_PROFILE:-isocast-notary}" --wait
+  xcrun stapler staple "$app"
+  rm -f "$zip"
+fi
 echo "$app"

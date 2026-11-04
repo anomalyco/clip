@@ -15,7 +15,18 @@ use std::time::{Duration, Instant};
 
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
-    fn CGRequestScreenCaptureAccess() -> bool;
+    fn clip_show_permission_guide(permission: i32);
+}
+
+const GUIDE_MICROPHONE: i32 = 2;
+const GUIDE_SCREEN: i32 = 4;
+
+/// Asked by the guide (native/permission_guide.m) about every 0.12 s, so it closes as soon
+/// as System Settings grants Screen Recording: this process can't see a grant made after
+/// launch, so it reads the fresh copy's answer, starting another read when that one is old.
+#[unsafe(no_mangle)]
+pub extern "C" fn clip_screen_granted() -> bool {
+    screen_access(true, None) != Access::Asking
 }
 
 #[link(name = "ServiceManagement", kind = "framework")]
@@ -75,19 +86,25 @@ pub fn screen_access(asked: bool, waker: Option<rune::Waker>) -> Access {
     }
 }
 
-/// The system prompt the first time, and the Screen Recording pane of System Settings.
-pub fn ask_screen() {
-    std::thread::spawn(|| {
-        if !unsafe { CGRequestScreenCaptureAccess() } {
-            open_settings("Privacy_ScreenCapture");
+/// Screen Recording, as Hex asks: System Settings' list with the guide docked under it,
+/// holding a Clip tile to drag in. Main thread. Rows an older Clip build left in the list
+/// (each ad-hoc build was a different app to macOS) are cleared first, so the list never
+/// shows a "Clip" switched on that isn't this one; `tccutil` resets only Clip's own rows.
+pub fn ask_screen(me: rune::AppHandle<crate::Clip>) {
+    std::thread::spawn(move || {
+        if let Some(id) = bundle_id() {
+            let _ = std::process::Command::new("/usr/bin/tccutil").args(["reset", "ScreenCapture", &id]).output();
         }
+        me.update(|_, _| unsafe { clip_show_permission_guide(GUIDE_SCREEN) });
     });
 }
 
-pub fn open_settings(anchor: &str) {
-    let _ = std::process::Command::new("/usr/bin/open")
-        .arg(format!("x-apple.systempreferences:com.apple.preference.security?{anchor}"))
-        .status();
+/// The running app's CFBundleIdentifier, read from its Info.plist.
+fn bundle_id() -> Option<String> {
+    let plist = bundle()?.join("Contents/Info.plist");
+    let out = std::process::Command::new("/usr/bin/defaults").arg("read").arg(plist).arg("CFBundleIdentifier").output().ok()?;
+    let id = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 fn media_audio() -> Retained<NSString> {
@@ -103,12 +120,13 @@ pub fn microphone(asked: bool) -> Access {
     }
 }
 
-/// The system prompt when it hasn't been asked, else the Microphone pane. `done` runs once
-/// the person answers the prompt.
+/// The system prompt when it hasn't been asked, else (refused before) the Microphone list
+/// with the guide saying to switch Clip on. `done` runs once the person answers the prompt.
+/// Main thread.
 pub fn ask_microphone(done: impl Fn() + Send + Sync + 'static) {
     let status: isize = unsafe { msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: &*media_audio()] };
     if status != 0 {
-        open_settings("Privacy_Microphone");
+        unsafe { clip_show_permission_guide(GUIDE_MICROPHONE) };
         return;
     }
     let block = block2::RcBlock::new(move |_granted: Bool| done());
