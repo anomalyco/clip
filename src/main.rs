@@ -420,7 +420,7 @@ fn prune_raw() {
 fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     std::thread::Builder::new().name("clip-recorder".into()).spawn(move || {
-        let mut recording: Option<(capture::Recording, track::Tracker, bool)> = None;
+        let mut recording: Option<(capture::Recording, track::Tracker, bool, bool)> = None;
         loop {
             // While recording, wake twice a second so the pill's clock ticks; otherwise sleep.
             let wait = if recording.is_some() { Duration::from_millis(500) } else { Duration::from_secs(3600) };
@@ -439,7 +439,8 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     match capture::start(&raw_dir(), target, opts) {
                         Ok((r, frame)) => {
                             let tracker = track::Tracker::start(frame, Instant::now(), matches!(target, Target::Display(_)));
-                            recording = Some((r, tracker, opts.system_audio || opts.microphone));
+                            let window = matches!(target, Target::Window { .. });
+                            recording = Some((r, tracker, opts.system_audio || opts.microphone, window));
                             hud.set_display(DisplayTarget::UnderPointer);
                             hud.update(|h, _| h.since = Some(Instant::now()));
                             hud.show();
@@ -458,10 +459,10 @@ fn worker(me: AppHandle<Clip>, hud: OverlayHandle<Hud>) -> mpsc::Sender<Cmd> {
                     }
                 }
                 Cmd::Stop => {
-                    let Some((r, tracker, audio)) = recording.take() else { continue };
+                    let Some((r, tracker, audio, window)) = recording.take() else { continue };
                     match r.stop() {
                         Ok(path) => {
-                            tracker.finish(&path);
+                            tracker.finish(&path, window);
                             me.update(move |s, tx| s.load(path, audio, tx))
                         }
                         Err(e) => me.update(move |s, tx| { s.phase = Phase::Idle; s.error = Some(e); s.show(tx) }),
@@ -510,6 +511,8 @@ fn poll(s: &mut Clip, _: f64, tx: &mut Tx) -> bool {
     if s.review.as_ref().is_some_and(|r| r.follow(&s.settings)) {
         tx.wake_after(Duration::from_millis(16));
     }
+    // A window's corner zooming into view rounds the preview's frame more (no live radius).
+    if s.review.as_ref().is_some_and(|r| r.frame_radius_stale(&s.settings)) { changed = true }
     if s.toast.as_ref().is_some_and(|(_, at)| at.elapsed() >= TOAST) {
         s.toast = None;
         changed = true;

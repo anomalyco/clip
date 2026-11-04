@@ -49,6 +49,11 @@ pub struct Track {
     /// Where each window was and which was in front (whole-screen recordings only).
     #[serde(default)]
     pub windows: crate::windows::Windows,
+    /// A window recording's own corner radius, in the movie's pixels (0 otherwise): macOS
+    /// leaves the area outside the window's rounded corners black, so a background's rounded
+    /// frame must round at least this much to hide it.
+    #[serde(default)]
+    pub corner: f64,
 }
 
 impl Track {
@@ -125,10 +130,37 @@ impl Tracker {
     }
 
     /// Stops watching and writes the track next to `raw`.
-    pub fn finish(self, raw: &Path) -> Track {
+    /// Stops tracking and saves the track beside `raw`. `window`: it's a window recording,
+    /// so its corner radius is measured from the movie too.
+    pub fn finish(self, raw: &Path, window: bool) -> Track {
         self.stop.store(true, Ordering::Relaxed);
-        let track = self.handle.join().unwrap_or_default();
+        let mut track = self.handle.join().unwrap_or_default();
+        if window { track.corner = window_corner(raw) }
         if let Ok(json) = serde_json::to_vec(&track) { let _ = std::fs::write(Track::path_for(raw), json); }
         track
     }
+}
+
+/// Darkest a pixel outside a window's corner can be and still count as empty (the encoder
+/// leaves the black a little noisy).
+const EMPTY: u8 = 12;
+
+/// A window recording's corner radius in pixels: the longest run of black along an edge from
+/// any of a frame's four corners, which is how far the window's rounded corner leaves the
+/// edge empty. Capped at a fifth of the short side, in case the window itself is black there.
+fn window_corner(raw: &Path) -> f64 {
+    let Some(f) = crate::thumbs::frames(raw, &[0.5], (16384.0, 16384.0)).pop().flatten() else { return 0.0 };
+    let (w, h) = (f.w as usize, f.h as usize);
+    let empty = |x: usize, y: usize| f.rgba[(y * w + x) * 4..][..3].iter().all(|&c| c <= EMPTY);
+    let run = |xs: &mut dyn Iterator<Item = (usize, usize)>| xs.take_while(|&(x, y)| empty(x, y)).count();
+    let cap = w.min(h) / 5;
+    let runs = [
+        run(&mut (0..cap).map(|i| (i, 0))), run(&mut (0..cap).map(|i| (w - 1 - i, 0))),
+        run(&mut (0..cap).map(|i| (i, h - 1))), run(&mut (0..cap).map(|i| (w - 1 - i, h - 1))),
+        run(&mut (0..cap).map(|i| (0, i))), run(&mut (0..cap).map(|i| (w - 1, i))),
+        run(&mut (0..cap).map(|i| (0, h - 1 - i))), run(&mut (0..cap).map(|i| (w - 1, h - 1 - i))),
+    ];
+    let longest = runs.into_iter().max().unwrap_or(0);
+    // A run the length of the cap means black content, not a corner.
+    if longest == 0 || longest >= cap { 0.0 } else { longest as f64 + 1.0 }
 }

@@ -53,6 +53,8 @@ pub struct Plan {
     pub idle: Vec<(f64, f64)>,
     pub zoom: Vec<Key>,
     pub background: Background,
+    /// A window recording's corner radius in the recording's pixels (`Track::corner`).
+    pub corner: f64,
     pub quality: Quality,
     pub fps: u32,
     pub gif: bool,
@@ -87,8 +89,13 @@ pub struct Canvas {
 /// The padding around the video with a background, as a fraction of its long side.
 pub const PAD: f64 = 0.07;
 pub const RADIUS: f64 = 0.018;
+/// How much wider than a window's measured corner the frame rounds: macOS draws window
+/// corners as continuous curves, which a circle of the same radius doesn't quite cover.
+const CORNER_COVER: f64 = 1.25;
 
-pub fn canvas(crop_w: u32, crop_h: u32, background: Background, fit: Option<(u32, u32)>) -> Canvas {
+/// The output canvas for a shot `crop_w` × `crop_h` (pixels). `corner`: a window recording's
+/// own corner radius in those pixels, which the rounded frame never rounds less than.
+pub fn canvas(crop_w: u32, crop_h: u32, background: Background, fit: Option<(u32, u32)>, corner: f64) -> Canvas {
     if background == Background::None {
         let (w, h) = fitted(crop_w, crop_h, fit);
         return Canvas { w, h, inner: [0.0, 0.0, w as f64, h as f64], radius: 0.0 };
@@ -97,7 +104,8 @@ pub fn canvas(crop_w: u32, crop_h: u32, background: Background, fit: Option<(u32
     let (w, h) = fitted(crop_w + 2 * pad, crop_h + 2 * pad, fit);
     let k = w as f64 / (crop_w + 2 * pad) as f64;
     let (iw, ih) = (crop_w as f64 * k, crop_h as f64 * k);
-    Canvas { w, h, inner: [(w as f64 - iw) / 2.0, (h as f64 - ih) / 2.0, iw, ih], radius: iw.max(ih) * RADIUS }
+    let radius = (iw.max(ih) * RADIUS).max(corner * CORNER_COVER * k);
+    Canvas { w, h, inner: [(w as f64 - iw) / 2.0, (h as f64 - ih) / 2.0, iw, ih], radius }
 }
 
 /// Source stretches with their playback rate, covering `[start, end]` in order.
@@ -187,8 +195,29 @@ fn color(rgb: u32, a: f64) -> *mut CGColor {
     unsafe { CGColorCreateSRGB(c(16), c(8), c(0), a) }
 }
 
-/// The gradient, the shadow and the rounded mask around the video.
-unsafe fn animation_tool(canvas: &Canvas, background: Background) -> Retained<AnyObject> {
+/// The rounded frame's radius in canvas pixels while `shown` (the recording's pixels) fills
+/// it: the canvas's own, or more while a window recording's corner (`corner`, the
+/// recording's pixels) is in view, scaled as the shot is, so the black macOS leaves outside
+/// the window's rounded corner never shows. Without a background there's no rounded frame.
+pub fn frame_radius(canvas: &Canvas, corner: f64, video: (u32, u32), shown: [f64; 4]) -> f64 {
+    if corner <= 0.0 || canvas.radius <= 0.0 { return canvas.radius }
+    let [x, y, w, h] = shown;
+    let k = (canvas.inner[2] / w).min(canvas.inner[3] / h);
+    let (left, top, right, bottom) = (x, y, video.0 as f64 - (x + w), video.1 as f64 - (y + h));
+    // How much of each corner's curve the shot reaches, from how far inside the edges it starts.
+    let reach = [(left, top), (right, top), (left, bottom), (right, bottom)].iter()
+        .map(|&(a, b)| (corner - a.max(b)).max(0.0)).fold(0.0, f64::max);
+    canvas.radius.max(reach * CORNER_COVER * k)
+}
+
+unsafe extern "C" {
+    static AVCoreAnimationBeginTimeAtZero: f64;
+}
+
+/// The gradient, the shadow and the rounded mask around the video. `radii`: the frame's
+/// radius over the composition's `length` seconds, when it changes (a window's corner
+/// zoomed into view).
+unsafe fn animation_tool(canvas: &Canvas, background: Background, radii: &[(f64, f64)], length: f64) -> Retained<AnyObject> {
     unsafe {
         let full = rect(0.0, 0.0, canvas.w as f64, canvas.h as f64);
         let [ix, iy, iw, ih] = canvas.inner;
@@ -214,6 +243,21 @@ unsafe fn animation_tool(canvas: &Canvas, background: Background) -> Retained<An
         let _: () = msg_send![&mask, setBackgroundColor: white];
         let _: () = msg_send![&mask, setCornerRadius: canvas.radius];
         let _: () = msg_send![&video, setMask: &*mask];
+        if radii.len() > 1 && length > 0.0 {
+            let number = |v: f64| -> Retained<AnyObject> { msg_send![class!(NSNumber), numberWithDouble: v] };
+            let values: Vec<_> = radii.iter().map(|r| number(r.1)).collect();
+            let times: Vec<_> = radii.iter().map(|r| number((r.0 / length).clamp(0.0, 1.0))).collect();
+            for l in [&mask, &shadow] {
+                let a: Retained<AnyObject> = msg_send![class!(CAKeyframeAnimation), animationWithKeyPath: &*NSString::from_str("cornerRadius")];
+                let _: () = msg_send![&a, setValues: &*NSArray::from_retained_slice(&values)];
+                let _: () = msg_send![&a, setKeyTimes: &*NSArray::from_retained_slice(&times)];
+                let _: () = msg_send![&a, setDuration: length];
+                let _: () = msg_send![&a, setBeginTime: AVCoreAnimationBeginTimeAtZero];
+                let _: () = msg_send![&a, setRemovedOnCompletion: false];
+                let _: () = msg_send![&a, setFillMode: &*NSString::from_str("both")];
+                let _: () = msg_send![&**l, addAnimation: &*a, forKey: &*NSString::from_str("corner")];
+            }
+        }
         for l in [&gradient, &shadow, &video] { let _: () = msg_send![&parent, addSublayer: &**l]; }
         CFRelease(black.cast());
         CFRelease(white.cast());
@@ -261,7 +305,7 @@ fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
 
         // Crop, scale and zoom.
         let fit = if small { Some(GIF_BOX) } else { plan.fit };
-        let canvas = canvas(plan.size.0, plan.size.1, plan.background, fit);
+        let canvas = canvas(plan.size.0, plan.size.1, plan.background, fit, plan.corner);
         let layer_ins: Retained<AnyObject> = msg_send![class!(AVMutableVideoCompositionLayerInstruction), videoCompositionLayerInstructionWithAssetTrack: &*comp_video];
         let at = |tau: f64| transform(shown_px(plan, source_at(&segs, tau)), &canvas);
         let _: () = msg_send![&layer_ins, setTransform: at(0.0), atTime: time(0.0)];
@@ -288,7 +332,20 @@ fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
         let _: () = msg_send![&composer, setFrameDuration: CMTime::new(1, if small { GIF_FPS } else { plan.fps as i32 })];
         let _: () = msg_send![&composer, setInstructions: &*NSArray::from_retained_slice(&[instruction])];
         if plan.background != Background::None {
-            let tool = animation_tool(&canvas, plan.background);
+            // The frame's radius at the same steps as the zoom, kept only when it changes.
+            let mut radii = Vec::new();
+            if plan.corner > 0.0 {
+                const STEP: f64 = 1.0 / 15.0;
+                let radius = |tau: f64| frame_radius(&canvas, plan.corner, plan.video, shown_px(plan, source_at(&segs, tau)));
+                let mut tau = 0.0;
+                loop {
+                    radii.push((tau, radius(tau)));
+                    if tau >= comp_len { break }
+                    tau = (tau + STEP).min(comp_len);
+                }
+                if radii.iter().all(|r| (r.1 - canvas.radius).abs() < 0.5) { radii.clear() }
+            }
+            let tool = animation_tool(&canvas, plan.background, &radii, comp_len);
             let _: () = msg_send![&composer, setAnimationTool: &*tool];
         }
         Ok(Built { composition, video: composer })
@@ -299,7 +356,7 @@ fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
 fn session(built: &Built, plan: &Plan, out: &Path, intermediate: bool, done: mpsc::Sender<()>) -> Result<Retained<AnyObject>, String> {
     let Built { composition, video: composer } = built;
     autoreleasepool(|_| unsafe {
-        let canvas = canvas(plan.size.0, plan.size.1, plan.background, plan.fit);
+        let canvas = canvas(plan.size.0, plan.size.1, plan.background, plan.fit, plan.corner);
         let preset = if intermediate { "AVAssetExportPresetAppleProRes4444LPCM" }
             else if canvas.w > H264_MAX.0 || canvas.h > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" }
             else { "AVAssetExportPresetHighestQuality" };
@@ -320,7 +377,7 @@ fn session(built: &Built, plan: &Plan, out: &Path, intermediate: bool, done: mps
 pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let name = format!("Clip {}", stamp());
-    let size = { let c = canvas(plan.size.0, plan.size.1, plan.background, plan.fit); (c.w, c.h) };
+    let size = { let c = canvas(plan.size.0, plan.size.1, plan.background, plan.fit, plan.corner); (c.w, c.h) };
     let bitrate = if plan.gif { None } else { plan.quality.bitrate(size.0, size.1, plan.fps) };
     let final_movie = dir.join(format!("{name}.mp4"));
     let built = build(source, plan, plan.gif)?;

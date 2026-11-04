@@ -108,6 +108,9 @@ pub struct Review {
     playhead: Live<[f32; 2]>,
     clock: LiveText,
     video_rect: Live<[f32; 4]>,
+    /// The preview frame's radius (canvas pixels) the view was last built with: a window's
+    /// corner zooming into view changes it, and the view is rebuilt for it.
+    frame_radius: Cell<f64>,
     /// The timeline's width from the last layout, to place the playhead between rebuilds.
     track_w: Cell<f32>,
     preview: Cell<Option<Preview>>,
@@ -127,7 +130,7 @@ impl Review {
         Self {
             player, source: path, track, trim: (0.0, f64::MAX), crop: FULL, grab: Grab::None, aspect: Aspect::Free, film: Vec::new(), muted: !has_audio,
             shot: Source::Desktop, icons: Vec::new(),
-            playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), video_rect: Live::new([0.0; 4]),
+            playhead: Live::new([0.0, 0.0]), clock: LiveText::new("0:00.0 / 0:00.0"), video_rect: Live::new([0.0; 4]), frame_radius: Cell::new(0.0),
             track_w: Cell::new(SIZE.0 - 40.0), preview: Cell::new(None), rate: Cell::new(1.0), derived: RefCell::new(None),
         }
     }
@@ -179,13 +182,13 @@ impl Review {
         let video = self.player.natural_size()?;
         let (start, end) = self.trim();
         let (views, size, zoom, idle) = self.derived(s, |p| (p.views.to_vec(), p.size, p.zoom.to_vec(), p.idle.to_vec()));
-        Some(Plan { start, end, views, video, size, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, quality: s.quality, fps: s.fps, gif })
+        Some(Plan { start, end, views, video, size, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, corner: self.track.corner, quality: s.quality, fps: s.fps, gif })
     }
 
     /// The export's size, and its length in seconds.
     fn out(&self, s: &Settings) -> Option<((u32, u32), f64)> {
         let plan = self.plan(s, false)?;
-        let c = export::canvas(plan.size.0, plan.size.1, s.background, s.size.bounds());
+        let c = export::canvas(plan.size.0, plan.size.1, s.background, s.size.bounds(), plan.corner);
         Some(((c.w, c.h), export::length(&plan)))
     }
 
@@ -230,6 +233,20 @@ impl Review {
         }
         self.publish(s);
         playing
+    }
+
+    /// The preview frame's radius now, in canvas pixels.
+    fn frame_radius_now(&self, s: &Settings) -> f64 {
+        let (cw, ch) = self.derived(s, |p| p.size);
+        let c = export::canvas(cw, ch, s.background, None, self.track.corner);
+        let (w, h) = self.player.natural_size().unwrap_or((16, 9));
+        let n = self.shown(s, self.player.time());
+        export::frame_radius(&c, self.track.corner, (w, h), [n[0] * w as f64, n[1] * h as f64, n[2] * w as f64, n[3] * h as f64])
+    }
+
+    /// Whether the preview's frame needs another radius than it was built with.
+    pub fn frame_radius_stale(&self, s: &Settings) -> bool {
+        self.preview.get().is_some() && self.track.corner > 0.0 && (self.frame_radius_now(s) - self.frame_radius.get()).abs() > 0.5
     }
 
     fn publish(&self, s: &Settings) {
@@ -431,7 +448,7 @@ fn edit_stage(s: &Clip, r: &Review, stage: [f32; 2], mut root: El) -> El {
 /// The export as it will look: the crop on its background, the video zooming inside it.
 fn preview_stage(s: &Clip, r: &Review, stage: [f32; 2], root: El) -> El {
     let (cw, ch) = r.derived(&s.settings, |p| p.size);
-    let c = export::canvas(cw, ch, s.settings.background, None);
+    let c = export::canvas(cw, ch, s.settings.background, None, r.track.corner);
     let k = (stage[0] / c.w as f32).min(stage[1] / c.h as f32);
     let (w, h) = (c.w as f32 * k, c.h as f32 * k);
     let (ox, oy) = ((stage[0] - w) / 2.0, (stage[1] - h) / 2.0);
@@ -447,7 +464,9 @@ fn preview_stage(s: &Clip, r: &Review, stage: [f32; 2], root: El) -> El {
         root = root.child(el().key("backdrop").absolute(ox, oy).w(w).h(h).radius(4.0)
             .linear_gradient(std::f32::consts::FRAC_PI_4, [(0.0, rgb(a)), (1.0, rgb(b))]));
     }
-    let radius = c.radius as f32 * k;
+    let canvas_radius = r.frame_radius_now(&s.settings);
+    r.frame_radius.set(canvas_radius);
+    let radius = canvas_radius as f32 * k;
     root.child(el().key("frame").absolute(inner[0], inner[1]).w(inner[2]).h(inner[3]).radius(radius).clip_rounded(radius)
         .shadow(if radius > 0.0 { 10.0 } else { 0.0 }, if radius > 0.0 { 30.0 } else { 0.0 }, Color::BLACK.alpha(0.45))
         .child(el().key("video").absolute(vx, vy).w(vw).h(vh).live_rect(&r.video_rect).video(&r.player, SurfaceFit::Fill)))
