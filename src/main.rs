@@ -14,6 +14,7 @@ mod settings;
 mod sound;
 mod thumbs;
 mod track;
+mod transcode;
 mod ui;
 mod zoom;
 

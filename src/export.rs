@@ -7,7 +7,7 @@
 //!   and a shadow;
 //! - a GIF is made from a small, 15 fps MP4 of the same composition.
 
-use crate::settings::Background;
+use crate::settings::{Background, Quality};
 use crate::zoom::{self, Key};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, Bool};
@@ -50,6 +50,8 @@ pub struct Plan {
     pub idle: Vec<(f64, f64)>,
     pub zoom: Vec<Key>,
     pub background: Background,
+    pub quality: Quality,
+    pub fps: u32,
     pub gif: bool,
 }
 
@@ -209,7 +211,13 @@ unsafe fn animation_tool(canvas: &Canvas, background: Background) -> Retained<An
 }
 
 /// Builds the composition and starts the session. The session reports progress and status.
-fn session(source: &Path, plan: &Plan, out: &Path, small: bool, done: mpsc::Sender<()>) -> Result<Retained<AnyObject>, String> {
+/// The composition (trim and speed) and the video composition (crop, zoom, background).
+pub struct Built {
+    pub composition: Retained<AnyObject>,
+    pub video: Retained<AnyObject>,
+}
+
+fn build(source: &Path, plan: &Plan, small: bool) -> Result<Built, String> {
     autoreleasepool(|_| unsafe {
         let asset: Retained<AnyObject> = msg_send![class!(AVURLAsset), URLAssetWithURL: &*url(source)?, options: std::ptr::null::<AnyObject>()];
         let tracks: Retained<NSArray<AnyObject>> = msg_send![&asset, tracksWithMediaType: &*ns("vide")];
@@ -270,20 +278,31 @@ fn session(source: &Path, plan: &Plan, out: &Path, small: bool, done: mpsc::Send
         let _: () = msg_send![&instruction, setLayerInstructions: &*NSArray::from_retained_slice(&[layer_ins])];
         let composer: Retained<AnyObject> = msg_send![class!(AVMutableVideoComposition), videoComposition];
         let _: () = msg_send![&composer, setRenderSize: NSSize::new(canvas.w as f64, canvas.h as f64)];
-        let _: () = msg_send![&composer, setFrameDuration: CMTime::new(1, if small { GIF_FPS } else { 60 })];
+        let _: () = msg_send![&composer, setFrameDuration: CMTime::new(1, if small { GIF_FPS } else { plan.fps as i32 })];
         let _: () = msg_send![&composer, setInstructions: &*NSArray::from_retained_slice(&[instruction])];
         if plan.background != Background::None {
             let tool = animation_tool(&canvas, plan.background);
             let _: () = msg_send![&composer, setAnimationTool: &*tool];
         }
+        Ok(Built { composition, video: composer })
+    })
+}
 
-        let preset = if canvas.w > H264_MAX.0 || canvas.h > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" } else { "AVAssetExportPresetHighestQuality" };
-        let session: Option<Retained<AnyObject>> = msg_send![msg_send![class!(AVAssetExportSession), alloc], initWithAsset: &*composition, presetName: &*ns(preset)];
+/// `intermediate` writes ProRes 4444 to a .mov for [`crate::transcode`] to re-encode.
+fn session(built: &Built, plan: &Plan, out: &Path, intermediate: bool, done: mpsc::Sender<()>) -> Result<Retained<AnyObject>, String> {
+    let Built { composition, video: composer } = built;
+    autoreleasepool(|_| unsafe {
+        let [_, _, cw, ch] = plan.crop;
+        let canvas = canvas(cw, ch, plan.background, plan.fit);
+        let preset = if intermediate { "AVAssetExportPresetAppleProRes4444LPCM" }
+            else if canvas.w > H264_MAX.0 || canvas.h > H264_MAX.1 { "AVAssetExportPresetHEVCHighestQuality" }
+            else { "AVAssetExportPresetHighestQuality" };
+        let session: Option<Retained<AnyObject>> = msg_send![msg_send![class!(AVAssetExportSession), alloc], initWithAsset: &**composition, presetName: &*ns(preset)];
         let session = session.ok_or("AVFoundation can't export this recording")?;
         let _: () = msg_send![&session, setOutputURL: &*url(out)?];
-        let _: () = msg_send![&session, setOutputFileType: &*ns("public.mpeg-4")];
+        let _: () = msg_send![&session, setOutputFileType: &*ns(if intermediate { "com.apple.quicktime-movie" } else { "public.mpeg-4" })];
         let _: () = msg_send![&session, setShouldOptimizeForNetworkUse: true];
-        let _: () = msg_send![&session, setVideoComposition: &*composer];
+        let _: () = msg_send![&session, setVideoComposition: &**composer];
         let _: () = msg_send![&session, setAudioTimePitchAlgorithm: &*ns("Spectral")];
         let block = block2::RcBlock::new(move || { let _ = done.send(()); });
         let _: () = msg_send![&session, exportAsynchronouslyWithCompletionHandler: &*block];
@@ -295,11 +314,25 @@ fn session(source: &Path, plan: &Plan, out: &Path, small: bool, done: mpsc::Send
 pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let name = format!("Clip {}", stamp());
-    let movie = if plan.gif { std::env::temp_dir().join(format!("{name}.mp4")) } else { dir.join(format!("{name}.mp4")) };
+    let [_, _, cw, ch] = plan.crop;
+    let size = { let c = canvas(cw, ch, plan.background, plan.fit); (c.w, c.h) };
+    let bitrate = if plan.gif { None } else { plan.quality.bitrate(size.0, size.1, plan.fps) };
+    let final_movie = dir.join(format!("{name}.mp4"));
+    let built = build(source, plan, plan.gif)?;
+    // High and Max without a background encode straight from the composition: one generation.
+    // A background needs Core Animation, which only the export session runs, so those go
+    // through a ProRes intermediate first.
+    if let Some(bitrate) = bitrate && plan.background == Background::None {
+        crate::transcode::run(&built.composition, Some(&built.video), &final_movie, size, plan.fps, bitrate, &progress)?;
+        return Ok(final_movie);
+    }
+    let movie = if plan.gif { std::env::temp_dir().join(format!("{name}.mp4")) }
+        else if bitrate.is_some() { std::env::temp_dir().join(format!("{name}.mov")) }
+        else { final_movie.clone() };
     let _ = std::fs::remove_file(&movie);
-    let share = if plan.gif { 0.5 } else { 1.0 };
+    let share = if plan.gif || bitrate.is_some() { 0.5 } else { 1.0 };
     let (done_tx, done) = mpsc::channel::<()>();
-    let session = session(source, plan, &movie, plan.gif, done_tx)?;
+    let session = session(&built, plan, &movie, bitrate.is_some(), done_tx)?;
     loop {
         match done.recv_timeout(Duration::from_millis(100)) {
             Ok(()) => break,
@@ -315,6 +348,11 @@ pub fn run(source: &Path, plan: &Plan, dir: &Path, progress: impl Fn(f32)) -> Re
         let error: Option<Retained<NSError>> = unsafe { msg_send![&session, error] };
         if let Some(e) = &error { eprintln!("clip: export failed: {e:?}") }
         return Err(error.map_or_else(|| format!("export ended with status {status}"), |e| e.localizedDescription().to_string()));
+    }
+    if let Some(bitrate) = bitrate {
+        let result = crate::transcode::run_file(&movie, &final_movie, size, plan.fps, bitrate, |f| progress(0.5 + 0.5 * f));
+        let _ = std::fs::remove_file(&movie);
+        return result.map(|()| final_movie);
     }
     if !plan.gif { return Ok(movie) }
     let gif = dir.join(format!("{name}.gif"));

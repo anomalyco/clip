@@ -81,6 +81,34 @@ impl Background {
 
 pub const SPEEDS: [f64; 3] = [1.0, 1.5, 2.0];
 
+/// How much bitrate an export gets. Standard is Apple's Highest Quality preset in one pass;
+/// High and Max set the bitrate themselves, at about 2× and 4× what that preset spends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Quality {
+    #[default]
+    Standard,
+    High,
+    Max,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 3] = [Quality::Standard, Quality::High, Quality::Max];
+    pub fn label(self) -> &'static str {
+        match self { Quality::Standard => "Standard", Quality::High => "High", Quality::Max => "Max" }
+    }
+    /// Bits a second for `w`×`h` at `fps`; None leaves it to Apple's preset.
+    pub fn bitrate(self, w: u32, h: u32, fps: u32) -> Option<u64> {
+        let (bits_per_pixel, ceiling) = match self {
+            Quality::Standard => return None,
+            Quality::High => (0.25, 80_000_000.0),
+            Quality::Max => (0.5, 160_000_000.0),
+        };
+        Some((w as f64 * h as f64 * fps as f64 * bits_per_pixel).clamp(4_000_000.0, ceiling) as u64)
+    }
+}
+
+pub const FRAME_RATES: [u32; 2] = [60, 30];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -96,12 +124,15 @@ pub struct Settings {
     pub skip_idle: bool,
     pub speed: f64,
     pub background: Background,
+    pub quality: Quality,
+    pub fps: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self { setup: Setup::Welcome, system_audio: false, microphone: false, show_clicks: true, sounds: true, size: Size::Original,
-            pick_area: true, zoom: true, skip_idle: false, speed: 1.0, background: Background::None }
+            pick_area: true, zoom: true, skip_idle: false, speed: 1.0, background: Background::None,
+            quality: Quality::Standard, fps: 60 }
     }
 }
 

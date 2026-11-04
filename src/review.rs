@@ -3,7 +3,7 @@
 //! cropped, on its background, zooming on clicks, idle stretches sped up.
 
 use crate::export::{self, Plan};
-use crate::settings::{Background, SPEEDS, Settings, Size};
+use crate::settings::{Background, FRAME_RATES, Quality, SPEEDS, Settings, Size};
 use crate::track::Track;
 use crate::ui::{BG, GREEN, clock, hex, hint, ink, kit, megabytes};
 use crate::zoom::{self, Key};
@@ -154,7 +154,7 @@ impl Review {
         let crop = self.crop_px()?;
         let (start, end) = self.trim();
         let (zoom, idle) = self.derived(s, |z, i| (z.to_vec(), i.to_vec()));
-        Some(Plan { start, end, crop, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, gif })
+        Some(Plan { start, end, crop, fit: s.size.bounds(), speed: s.speed, idle, zoom, background: s.background, quality: s.quality, fps: s.fps, gif })
     }
 
     /// The export's size, and its length in seconds.
@@ -522,6 +522,12 @@ fn toolbar(s: &Clip, r: &Review) -> El {
             }
         }).build(k))
         .child(spacer())
+        .child(label("Quality"))
+        .child(SegmentedControl::new(&Quality::ALL.map(|q| q.label()), Quality::ALL.iter().position(|q| *q == s.settings.quality)).fit()
+            .on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.quality = Quality::ALL[i]; s.settings.save() }).build(k))
+        .child(SegmentedControl::new(&["60 fps", "30 fps"], FRAME_RATES.iter().position(|f| *f == s.settings.fps)).fit()
+            .on_pick(|s: &mut Clip, i, tx| { tx.blur(); s.settings.fps = FRAME_RATES[i]; s.settings.save() }).build(k))
+        .child(spacer())
         .child(label("Background"))
         .child(swatches(s));
     let second = row().key("toolbar-2").w_full().h(28.0).gap(12.0).center_y()
@@ -541,7 +547,10 @@ fn toolbar(s: &Clip, r: &Review) -> El {
 
 pub fn view(s: &Clip, r: &Review, cx: &mut Cx<Clip>) -> El {
     let out = r.out(&s.settings);
-    let px = out.map_or(String::new(), |((w, h), len)| format!("{}  ·  {w} × {h}", clock(len)));
+    let px = out.map_or(String::new(), |((w, h), len)| {
+        let rate = s.settings.quality.bitrate(w, h, s.settings.fps).map_or("auto".into(), |b| format!("{:.0} Mbps", b as f64 / 1e6));
+        format!("{}  ·  {w} × {h}  ·  {} fps  ·  {rate}", clock(len), s.settings.fps)
+    });
     let status = match &s.phase {
         Phase::Exporting(f) => format!("Exporting… {:.0}%", f * 100.0),
         Phase::Copied(path) => format!("Copied · {}", std::fs::metadata(path).map_or(String::new(), |m| megabytes(m.len()))),

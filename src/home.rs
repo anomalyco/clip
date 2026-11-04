@@ -2,7 +2,7 @@
 //! it settles into: recent clips and what goes into a recording.
 
 use crate::permissions::Access;
-use crate::settings::{Setup, Size};
+use crate::settings::{FRAME_RATES, Quality, Setup, Size};
 use crate::ui::{BG, CARD, DISPLAY, GREEN, LEAD, LINE, clock, hex, hint, ink, keycap, kit, megabytes};
 use crate::{Clip, Recent};
 use rune::tok::type_;
@@ -10,7 +10,7 @@ use rune::{Color, Cx, DragItem, El, Tx, col, el, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, SegmentedControl, Switch};
 
 pub const SETUP_SIZE: (f32, f32) = (640.0, 560.0);
-pub const HOME_SIZE: (f32, f32) = (720.0, 840.0);
+pub const HOME_SIZE: (f32, f32) = (760.0, 960.0);
 
 fn page(body: El, action: El, step: Option<usize>) -> El {
     let mut dots = row().key("dots").gap(6.0).h(20.0).center();
@@ -153,6 +153,12 @@ fn home(s: &Clip) -> El {
         setting_row("clicks", "Highlight clicks", "Draw a ring where you click.", switch(st.show_clicks, |s, _| { s.settings.show_clicks ^= true; s.settings.save() })),
         setting_row("sounds", "Sounds", "A soft tick when recording starts and stops.", switch(st.sounds, |s, _| { s.settings.sounds ^= true; s.settings.save() })),
         setting_row("login", "Open at login", "Keep Clip ready after a restart.", switch(s.login == Some(true), |s, _| s.toggle_login())),
+        setting_row("quality", "Quality", "High and Max spend about 2× and 4× the bits on detail and motion.",
+            SegmentedControl::new(&Quality::ALL.map(|q| q.label()), Quality::ALL.iter().position(|q| *q == st.quality)).fit()
+                .on_pick(|s: &mut Clip, i, _| { s.settings.quality = Quality::ALL[i]; s.settings.save() }).build(k)),
+        setting_row("fps", "Frame rate", "30 fps makes files about half the size.",
+            SegmentedControl::new(&["60 fps", "30 fps"], FRAME_RATES.iter().position(|f| *f == st.fps)).fit()
+                .on_pick(|s: &mut Clip, i, _| { s.settings.fps = FRAME_RATES[i]; s.settings.save() }).build(k)),
         setting_row("size", "Export size", "Smaller files paste faster.",
             SegmentedControl::new(&sizes, Size::ALL.iter().position(|z| *z == st.size)).fit()
                 .on_pick(|s: &mut Clip, i, _| { s.settings.size = Size::ALL[i]; s.settings.save() }).build(k)),
