@@ -72,18 +72,29 @@ fn rgb(c: u32) -> [f32; 4] {
     [((c >> 16) & 0xff) as f32 / 255.0, ((c >> 8) & 0xff) as f32 / 255.0, (c & 0xff) as f32 / 255.0, 1.0]
 }
 
-impl Renderer {
-    /// A renderer whose canvases come back in `output` byte order.
-    pub fn new(output: Pixels) -> Result<Renderer, String> {
+/// The one GPU device every renderer draws with, opened on first use and kept for the life
+/// of the process: a device is slow to open, and on DX12 each one opened and closed leaves
+/// a few handles behind, which added up over the reviews and exports of a long session.
+fn device() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    use std::sync::OnceLock;
+    static DEVICE: OnceLock<Result<(wgpu::Device, wgpu::Queue), String>> = OnceLock::new();
+    DEVICE.get_or_init(|| {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         })).map_err(|e| format!("no GPU for rendering ({e})"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("clip-render"),
             ..Default::default()
-        })).map_err(|e| format!("couldn't open the GPU ({e})"))?;
+        })).map_err(|e| format!("couldn't open the GPU ({e})"))
+    }).clone()
+}
+
+impl Renderer {
+    /// A renderer whose canvases come back in `output` byte order.
+    pub fn new(output: Pixels) -> Result<Renderer, String> {
+        let (device, queue) = device()?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("clip-render"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render.wgsl").into()),
