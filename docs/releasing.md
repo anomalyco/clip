@@ -50,11 +50,18 @@ digest each job reports.
 
 ## The release environment
 
+The `release` environment holds the variables below. Its secrets come from AWS
+Secrets Manager (account `anomaly-secrets`, managed from
+[anomalyco/secrets](https://github.com/anomalyco/secrets)), not from GitHub:
+sign-macos assumes `role/github/clip-release` with GitHub OIDC and reads only
+its own folder, `clip/release/*`. Clip signs as Ryan Vogel's Developer ID
+(team 9G68SMNHEU), so it cannot use the shared Anomaly Apple identity that
+Hex and Deadbolt read.
+
 | Name | Kind | What |
 |---|---|---|
-| `APPLE_SIGNING_CERTIFICATE` | secret | base64 `.p12` with the Developer ID Application identity (team 9G68SMNHEU) |
-| `APPLE_SIGNING_CERTIFICATE_PASSWORD` | secret | optional; the `.p12`'s password |
-| `APPLE_NOTARY_KEY` | secret | App Store Connect API key (`.p8`, PEM or base64) for notarytool |
+| `clip/release/APPLE_SIGNING_CERTIFICATE` | AWS secret | base64 `.p12`, no password, with the Developer ID Application identity (team 9G68SMNHEU) |
+| `clip/release/APPLE_NOTARY_KEY` | AWS secret | App Store Connect API key (`.p8`, PEM or base64) for notarytool |
 | `APPLE_NOTARY_KEY_ID` | variable | the key's ID |
 | `APPLE_NOTARY_ISSUER_ID` | variable | the key's issuer UUID (App Store Connect › Users and Access › Integrations) |
 
