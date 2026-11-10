@@ -1,0 +1,91 @@
+name: Clip AWS secrets
+
+# Temporary: copies Clip's Apple values from the release environment's secrets
+# into clip/release/* in AWS Secrets Manager and verifies what is stored there.
+# Delete once the release workflow reads them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: copy (write the release environment's values) or verify (read them back from AWS)
+        type: choice
+        options: [copy, verify]
+        default: verify
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/clip-release
+          role-session-name: clip-migrate-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Copy the release environment's values
+        if: inputs.mode == 'copy'
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          umask 077
+          for pair in CERTIFICATE:APPLE_SIGNING_CERTIFICATE NOTARY_KEY:APPLE_NOTARY_KEY; do
+            var=${pair%%:*}
+            name=${pair#*:}
+            [ -n "${!var}" ] || { echo "::error::the release environment has no $name"; exit 1; }
+            printf '%s' "${!var}" > "$temp/$name"
+            aws secretsmanager put-secret-value --secret-id "clip/release/$name" \
+              --secret-string "file://$temp/$name" --query VersionId --output text
+          done
+          echo "copied both"
+      - name: Check the stored values
+        run: |
+          set -euo pipefail
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          umask 077
+          aws secretsmanager get-secret-value --secret-id clip/release/APPLE_SIGNING_CERTIFICATE \
+            --query SecretString --output text > "$temp/certificate.b64"
+          aws secretsmanager get-secret-value --secret-id clip/release/APPLE_NOTARY_KEY \
+            --query SecretString --output text > "$temp/notary-key"
+          tr -d '\r\n ' < "$temp/certificate.b64" | base64 -d > "$temp/certificate.p12"
+          [ -s "$temp/certificate.p12" ] || { echo "::error::the certificate decodes to nothing"; exit 1; }
+          # A macOS-made .p12 may use RC2, which OpenSSL 3 reads only with -legacy.
+          if ! openssl pkcs12 -in "$temp/certificate.p12" -nokeys -passin pass: -clcerts -out "$temp/certificate.pem" 2>/dev/null; then
+            openssl pkcs12 -in "$temp/certificate.p12" -nokeys -passin pass: -clcerts -legacy -out "$temp/certificate.pem"
+          fi
+          subject=$(openssl x509 -in "$temp/certificate.pem" -noout -subject -nameopt RFC2253)
+          echo "certificate: $subject"
+          case "$subject" in
+            *"CN=Developer ID Application: Ryan Vogel (9G68SMNHEU)"*) ;;
+            *) echo "::error::the certificate is not the Developer ID Application for team 9G68SMNHEU"; exit 1 ;;
+          esac
+          case "$(cat "$temp/notary-key")" in
+            -----BEGIN*)
+              grep -q -- '-----BEGIN PRIVATE KEY-----' "$temp/notary-key" ||
+                { echo "::error::the notary key is not a .p8"; exit 1; }
+              ;;
+            *)
+              tr -d '\r\n ' < "$temp/notary-key" | base64 -d > "$temp/notary-key.p8"
+              grep -q -- '-----BEGIN PRIVATE KEY-----' "$temp/notary-key.p8" ||
+                { echo "::error::the notary key is not a .p8"; exit 1; }
+              ;;
+          esac
+          echo "notary key: ok"
+          for name in APPLE_SIGNING_CERTIFICATE APPLE_NOTARY_KEY; do
+            count=$(aws secretsmanager list-secret-version-ids --secret-id "clip/release/$name" \
+              --query 'length(Versions)' --output text)
+            echo "$name: $count versions"
+          done
