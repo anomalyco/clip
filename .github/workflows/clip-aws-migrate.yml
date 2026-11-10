@@ -84,8 +84,3 @@ jobs:
               ;;
           esac
           echo "notary key: ok"
-          for name in APPLE_SIGNING_CERTIFICATE APPLE_NOTARY_KEY; do
-            count=$(aws secretsmanager list-secret-version-ids --secret-id "clip/release/$name" \
-              --query 'length(Versions)' --output text)
-            echo "$name: $count versions"
-          done
